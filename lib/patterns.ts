@@ -1,0 +1,102 @@
+export type PatternGroup = {
+  pattern: string;
+  count: number;
+  urls: string[];
+};
+
+const MAX_DISTINCT_LITERALS = 6;
+const MAX_LITERAL_LENGTH = 40;
+const MAX_SINGLE_SEGMENT_WORDS = 3;
+
+function segmentsOf(url: string): string[] {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    pathname = url.split(/[?#]/)[0] ?? "";
+  }
+  return pathname.split("/").filter((segment) => segment.length > 0);
+}
+
+function looksVariable(segment: string): boolean {
+  return /\d/.test(segment) || segment.length > MAX_LITERAL_LENGTH;
+}
+
+function wordCount(segment: string): number {
+  return segment.split("-").filter((word) => word.length > 0).length;
+}
+
+/**
+ * Groups URLs into path templates, e.g. /predictions/arsenal-vs-chelsea
+ * becomes /predictions/*. Returns groups sorted by size, largest first.
+ */
+export function groupByPattern(urls: string[]): PatternGroup[] {
+  const parsed = urls.map((url) => ({ url, segments: segmentsOf(url) }));
+
+  // Sections that have pages beneath them, e.g. "blog" when /blog/x exists.
+  const sectionsWithChildren = new Set<string>();
+  for (const { segments } of parsed) {
+    if (segments.length > 1) sectionsWithChildren.add(segments[0]);
+  }
+
+  // Resolve the first segment, then bucket URLs by shape:
+  // first segment + segment count.
+  const shapes = new Map<string, { url: string; segments: string[]; head: string }[]>();
+  for (const { url, segments } of parsed) {
+    let head = "";
+    if (segments.length === 1) {
+      const first = segments[0];
+      const keep =
+        sectionsWithChildren.has(first) ||
+        (!looksVariable(first) && wordCount(first) <= MAX_SINGLE_SEGMENT_WORDS);
+      head = keep ? first : "*";
+    } else if (segments.length > 1) {
+      head = looksVariable(segments[0]) ? "*" : segments[0];
+    }
+    const key = `${head}\u0000${segments.length}`;
+    const bucket = shapes.get(key);
+    const entry = { url, segments, head };
+    if (bucket) bucket.push(entry);
+    else shapes.set(key, [entry]);
+  }
+
+  const groups = new Map<string, string[]>();
+  for (const bucket of shapes.values()) {
+    const depth = bucket[0].segments.length;
+
+    // How often each value appears at each position within this shape.
+    const frequencies: Map<string, number>[] = [];
+    for (let position = 1; position < depth; position++) {
+      const counts = new Map<string, number>();
+      for (const { segments } of bucket) {
+        const value = segments[position];
+        counts.set(value, (counts.get(value) ?? 0) + 1);
+      }
+      frequencies[position] = counts;
+    }
+
+    for (const { url, segments, head } of bucket) {
+      let pattern = "/";
+      if (depth > 0) {
+        const parts = [head];
+        for (let position = 1; position < depth; position++) {
+          const value = segments[position];
+          const counts = frequencies[position];
+          const keep =
+            !looksVariable(value) &&
+            (counts.get(value) ?? 0) >= 2 &&
+            counts.size <= MAX_DISTINCT_LITERALS;
+          parts.push(keep ? value : "*");
+        }
+        pattern = `/${parts.join("/")}`;
+      }
+      const group = groups.get(pattern);
+      if (group) group.push(url);
+      else groups.set(pattern, [url]);
+    }
+  }
+
+  return [...groups.entries()]
+    .map(([pattern, groupUrls]) => ({ pattern, count: groupUrls.length, urls: groupUrls }))
+    .sort((a, b) => b.count - a.count || a.pattern.localeCompare(b.pattern));
+}

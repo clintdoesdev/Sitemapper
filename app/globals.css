@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+@theme {
+  --color-paper: #eef2ee;
+  --color-sheet: #f7f9f7;
+  --color-ink: #17202a;
+  --color-muted: #5c6b66;
+  --color-rule: #c7d1ca;
+  --color-contour: #2f6b4f;
+  --color-contour-soft: #d3e3d8;
+  --color-alert: #a8432a;
+
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --animate-survey: survey 1.4s ease-in-out infinite;
+
+  @keyframes survey {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(250%);
+    }
+  }
+}
+
+@theme inline {
+  --font-display: var(--font-bricolage), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-schibsted), ui-sans-serif, system-ui, sans-serif;
+}
+
+html {
+  background-color: var(--color-paper);
+  color: var(--color-ink);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100dvh;
+  background-color: var(--color-paper);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-contour);
+  outline-offset: 2px;
+}
+
+::selection {
+  background-color: var(--color-contour-soft);
+  color: var(--color-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
