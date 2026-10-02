@@ -1,6 +1,20 @@
 "use client";
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import {
+  CheckIcon,
+  ChevronIcon,
+  copyText,
+  CopyIcon,
+  DownloadIcon,
+  downloadCsv,
+  formatNumber,
+  plural,
+  secondaryButton,
+  toAbsolute,
+} from "./ui";
+import { ExtractionRunView, type ExtractionRun } from "./contents";
+import type { ExtractResult } from "@/lib/extract";
 
 type Group = { pattern: string; count: number; urls: string[] };
 
@@ -15,6 +29,14 @@ type MapResult = {
 };
 
 const MAX_RENDERED_URLS = 500;
+const MAX_EXTRACT_PAGES = 100;
+const EXTRACT_CHUNK = 10;
+
+/** Up to `limit` URLs spread evenly across the list, so samples cover the whole pattern. */
+function sample(urls: string[], limit: number): string[] {
+  if (urls.length <= limit) return urls;
+  return Array.from({ length: limit }, (_, index) => urls[Math.floor((index * urls.length) / limit)]);
+}
 
 const CONTOURS = [
   "M373.9 230.0C374.8 234.5 371.6 240.1 368.8 244.6C366.0 249.0 362.3 254.3 357.2 256.6C352.1 258.8 344.0 257.8 338.2 257.9C332.3 258.0 328.1 257.3 322.1 257.2C316.0 257.1 306.9 259.5 302.1 257.3C297.4 255.0 295.0 248.2 293.6 243.7C292.2 239.1 293.6 234.6 293.6 230.0C293.7 225.4 291.8 220.5 293.7 216.4C295.5 212.2 300.3 208.7 304.7 205.3C309.1 201.8 314.1 196.8 319.9 195.5C325.7 194.2 334.6 195.0 339.5 197.5C344.5 200.0 345.8 207.4 349.7 210.7C353.6 214.1 359.1 214.4 363.1 217.6C367.1 220.8 372.9 225.5 373.9 230.0Z",
@@ -25,94 +47,6 @@ const CONTOURS = [
   "M625.1 250.0C616.9 280.9 553.0 310.4 522.5 333.5C492.0 356.7 468.5 366.5 442.0 388.8C415.5 411.0 397.9 453.7 363.5 467.1C329.2 480.4 277.4 474.7 236.0 468.7C194.6 462.6 146.2 451.6 115.0 430.9C83.9 410.1 58.9 374.3 49.1 344.2C39.3 314.1 59.3 282.5 56.3 250.0C53.4 217.5 21.7 179.5 31.3 149.1C40.8 118.7 77.6 81.4 113.4 67.6C149.2 53.7 205.4 68.3 246.1 65.9C286.8 63.5 320.3 50.0 357.7 52.9C395.1 55.8 434.8 67.5 470.5 83.3C506.1 99.2 545.7 120.3 571.5 148.1C597.3 175.8 633.3 219.1 625.1 250.0Z",
   "M655.6 254.0C644.5 289.5 577.2 321.0 544.6 348.1C512.0 375.2 488.7 387.4 460.1 416.3C431.4 445.3 413.0 505.0 372.5 522.0C331.9 539.0 264.4 529.1 216.6 518.4C168.8 507.7 121.1 483.6 85.6 457.7C50.1 431.8 17.0 397.0 3.5 363.1C-10.0 329.1 8.0 291.7 4.4 254.0C0.9 216.3 -30.1 172.2 -18.0 136.9C-5.9 101.5 35.2 57.3 77.0 41.8C118.7 26.4 185.0 47.9 232.6 44.2C280.2 40.4 316.8 19.3 362.7 19.5C408.5 19.6 466.2 25.9 507.6 45.1C549.1 64.4 586.6 100.1 611.2 134.9C635.9 169.7 666.7 218.5 655.6 254.0Z",
 ];
-
-function formatNumber(value: number): string {
-  return value.toLocaleString("en-US");
-}
-
-function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
-  return `${formatNumber(count)} ${count === 1 ? singular : pluralForm}`;
-}
-
-/** URLs on the site's origin arrive as paths; everything else is absolute. */
-function toAbsolute(url: string, origin: string): string {
-  return url.startsWith("/") ? origin + url : url;
-}
-
-function csvCell(value: string): string {
-  return `"${value.replace(/"/g, '""')}"`;
-}
-
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // Fall through to the legacy approach.
-  }
-  try {
-    const textarea = document.createElement("textarea");
-    textarea.value = text;
-    textarea.setAttribute("readonly", "");
-    textarea.style.position = "fixed";
-    textarea.style.top = "0";
-    textarea.style.opacity = "0";
-    document.body.appendChild(textarea);
-    textarea.select();
-    textarea.setSelectionRange(0, text.length);
-    const copied = document.execCommand("copy");
-    document.body.removeChild(textarea);
-    return copied;
-  } catch {
-    return false;
-  }
-}
-
-function Icon({ children, className = "size-4" }: { children: React.ReactNode; className?: string }) {
-  return (
-    <svg
-      aria-hidden="true"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      {children}
-    </svg>
-  );
-}
-
-const CopyIcon = () => (
-  <Icon>
-    <rect x="9" y="9" width="11" height="11" rx="2" />
-    <path d="M5 15V6a2 2 0 0 1 2-2h8" />
-  </Icon>
-);
-
-const CheckIcon = () => (
-  <Icon>
-    <path d="M5 12.5l4.5 4.5L19 7.5" />
-  </Icon>
-);
-
-const DownloadIcon = () => (
-  <Icon>
-    <path d="M12 4v11" />
-    <path d="M7.5 10.5L12 15l4.5-4.5" />
-    <path d="M5 19h14" />
-  </Icon>
-);
-
-const ChevronIcon = ({ open }: { open: boolean }) => (
-  <Icon className={`size-4 shrink-0 transition-transform duration-150 ${open ? "rotate-90" : ""}`}>
-    <path d="M9 6l6 6-6 6" />
-  </Icon>
-);
 
 function Contours() {
   return (
@@ -131,9 +65,6 @@ function Contours() {
   );
 }
 
-const secondaryButton =
-  "inline-flex h-11 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-rule bg-transparent px-3 text-sm sm:px-4 font-medium text-ink transition-colors hover:border-contour hover:text-contour disabled:cursor-not-allowed disabled:text-muted disabled:hover:border-rule sm:flex-none";
-
 export default function Home() {
   const [domain, setDomain] = useState("");
   const [loading, setLoading] = useState(false);
@@ -144,12 +75,17 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [runs, setRuns] = useState<ExtractionRun[]>([]);
+  const extractAbort = useRef<AbortController | null>(null);
+  const nextRunId = useRef(1);
+  const extracting = runs.some((run) => run.state === "running");
 
   const deferredFilter = useDeferredValue(filter);
 
   useEffect(() => {
     return () => {
       if (copiedTimer.current) clearTimeout(copiedTimer.current);
+      extractAbort.current?.abort();
     };
   }, []);
 
@@ -214,11 +150,74 @@ export default function Home() {
       setOpen(new Set(next.groups[0] ? [next.groups[0].pattern] : []));
       setCopied(false);
       setCopyError(null);
+      extractAbort.current?.abort();
+      setRuns([]);
     } catch {
       setError("Couldn't reach the Sitemapper server. Check your connection and try again.");
     } finally {
       setLoading(false);
     }
+  }
+
+  async function extractGroup(group: Group) {
+    if (!result || extracting) return;
+    const urls = sample(group.urls, MAX_EXTRACT_PAGES).map((url) => toAbsolute(url, result.origin));
+    const id = nextRunId.current++;
+    const controller = new AbortController();
+    extractAbort.current = controller;
+    const update = (change: (run: ExtractionRun) => ExtractionRun) =>
+      setRuns((current) => current.map((run) => (run.id === id ? change(run) : run)));
+
+    setRuns((current) => [
+      { id, pattern: group.pattern, urls, pages: [], state: "running", error: null },
+      ...current.filter((run) => run.pattern !== group.pattern),
+    ]);
+
+    try {
+      for (let start = 0; start < urls.length; start += EXTRACT_CHUNK) {
+        const chunk = urls.slice(start, start + EXTRACT_CHUNK);
+        const response = await fetch("/api/extract", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ urls: chunk }),
+          signal: controller.signal,
+        });
+        let data: { pages?: ExtractResult[]; error?: string } | null = null;
+        try {
+          data = await response.json();
+        } catch {
+          data = null;
+        }
+        if (!response.ok || !data?.pages) {
+          const message =
+            data?.error ??
+            (response.status === 504
+              ? "The site took too long to respond. Try again later."
+              : `The server returned an error (status ${response.status}). Try again in a minute.`);
+          update((run) => ({ ...run, state: "failed", error: message }));
+          return;
+        }
+        const pages = data.pages;
+        update((run) => ({ ...run, pages: [...run.pages, ...pages] }));
+      }
+      update((run) => ({ ...run, state: "done" }));
+    } catch {
+      if (controller.signal.aborted) {
+        update((run) => ({ ...run, state: "stopped" }));
+      } else {
+        update((run) => ({
+          ...run,
+          state: "failed",
+          error: "Couldn't reach the Sitemapper server. Check your connection and try again.",
+        }));
+      }
+    } finally {
+      if (extractAbort.current === controller) extractAbort.current = null;
+    }
+  }
+
+  function stopExtracting() {
+    extractAbort.current?.abort();
   }
 
   function toggle(pattern: string) {
@@ -248,21 +247,10 @@ export default function Home() {
 
   function handleDownload() {
     if (!result) return;
-    const rows = ["url,pattern"];
-    for (const group of visibleGroups) {
-      for (const url of group.urls) {
-        rows.push(`${csvCell(toAbsolute(url, result.origin))},${csvCell(group.pattern)}`);
-      }
-    }
-    const blob = new Blob([rows.join("\r\n") + "\r\n"], { type: "text/csv;charset=utf-8" });
-    const href = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = href;
-    link.download = `${host}-pages.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setTimeout(() => URL.revokeObjectURL(href), 10_000);
+    const rows = visibleGroups.flatMap((group) =>
+      group.urls.map((url) => [toAbsolute(url, result.origin), group.pattern]),
+    );
+    downloadCsv(`${host}-pages.csv`, ["url", "pattern"], rows);
   }
 
   return (
@@ -295,10 +283,10 @@ export default function Home() {
               autoComplete="off"
               spellCheck={false}
               enterKeyHint="go"
-              placeholder="tiporacle.com"
+              placeholder="Enter a domain, like example.com"
               value={domain}
               onChange={(event) => setDomain(event.target.value)}
-              className="h-14 w-full min-w-0 rounded-md sm:flex-1 border border-rule bg-sheet px-4 font-mono text-lg text-ink placeholder:text-muted hover:border-contour/60"
+              className="h-14 w-full min-w-0 rounded-md sm:flex-1 border border-rule bg-sheet px-4 font-mono text-lg text-ink placeholder:font-sans placeholder:text-base placeholder:text-muted hover:border-contour/60"
             />
             <button
               type="submit"
@@ -427,10 +415,36 @@ export default function Home() {
                             </span>
                           </button>
                           {isOpen && (
-                            <div
-                              id={panelId}
-                              className="max-h-96 overflow-y-auto border-t border-rule bg-sheet px-4 py-3"
-                            >
+                            <div id={panelId} className="border-t border-rule bg-sheet">
+                              <div className="flex flex-col gap-3 border-b border-rule px-4 py-3 sm:flex-row sm:items-center">
+                                <button
+                                  type="button"
+                                  onClick={() => extractGroup(group)}
+                                  disabled={extracting}
+                                  className={secondaryButton}
+                                >
+                                  Extract contents
+                                </button>
+                                <p className="text-sm text-muted">
+                                  {(() => {
+                                    const run = runs.find((r) => r.pattern === group.pattern);
+                                    if (run?.state === "running") {
+                                      return `Reading ${formatNumber(run.pages.length)} of ${plural(run.urls.length, "page")}.`;
+                                    }
+                                    if (run) {
+                                      return (
+                                        <a href={`#contents-${run.id}`} className="text-contour underline">
+                                          View extracted contents
+                                        </a>
+                                      );
+                                    }
+                                    return group.count > MAX_EXTRACT_PAGES
+                                      ? `Reads ${formatNumber(MAX_EXTRACT_PAGES)} of these pages, spread across the pattern, and pulls out titles, headings and text.`
+                                      : `Reads ${group.count === 1 ? "this page" : `these ${formatNumber(group.count)} pages`} and pulls out titles, headings and text.`;
+                                  })()}
+                                </p>
+                              </div>
+                              <div className="max-h-96 overflow-y-auto px-4 py-3">
                               <ul className="space-y-0.5">
                                 {shown.map((url) => (
                                   <li key={url}>
@@ -452,6 +466,7 @@ export default function Home() {
                                 </p>
                               )}
                             </div>
+                            </div>
                           )}
                         </li>
                       );
@@ -459,6 +474,29 @@ export default function Home() {
                   </ul>
                 )}
               </>
+            )}
+
+            {runs.length > 0 && (
+              <section aria-labelledby="contents-heading" className="mt-14 border-t border-rule pt-10">
+                <h2 id="contents-heading" className="font-display text-3xl font-bold tracking-tight text-ink">
+                  Page contents
+                </h2>
+                <p className="mt-2 max-w-[52ch] text-sm leading-relaxed text-muted">
+                  Templates show the wording the pages share, with {"{…}"} where it changes. Open a page to see
+                  its headings and text.
+                </p>
+                <div className="mt-8 space-y-10">
+                  {runs.map((run) => (
+                    <ExtractionRunView
+                      key={run.id}
+                      run={run}
+                      origin={result.origin}
+                      host={host}
+                      onStop={stopExtracting}
+                    />
+                  ))}
+                </div>
+              </section>
             )}
 
             {result.sitemaps.length > 0 && (

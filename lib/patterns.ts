@@ -100,3 +100,71 @@ export function groupByPattern(urls: string[]): PatternGroup[] {
     .map(([pattern, groupUrls]) => ({ pattern, count: groupUrls.length, urls: groupUrls }))
     .sort((a, b) => b.count - a.count || a.pattern.localeCompare(b.pattern));
 }
+
+function tokens(text: string): string[] {
+  return text.split(/\s+/).filter((token) => token.length > 0);
+}
+
+function same(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+function longestCommonSubsequence(a: string[], b: string[]): string[] {
+  const table: number[][] = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      table[i][j] = same(a[i], b[j]) ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+    }
+  }
+  const result: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (same(a[i], b[j])) {
+      result.push(a[i]);
+      i++;
+      j++;
+    } else if (table[i + 1][j] >= table[i][j + 1]) i++;
+    else j++;
+  }
+  return result;
+}
+
+/** Which gaps around the shared words hold text in this title. */
+function filledGaps(words: string[], common: string[]): boolean[] {
+  const filled = new Array<boolean>(common.length + 1).fill(false);
+  let position = 0;
+  for (const word of words) {
+    if (position < common.length && same(word, common[position])) position++;
+    else filled[position] = true;
+  }
+  return filled;
+}
+
+/**
+ * Finds the template behind a set of titles, e.g.
+ * "Arsenal vs Chelsea Prediction | Site" and "Inter vs Milan Prediction | Site"
+ * give "{…} vs {…} Prediction | Site". Returns null when nothing is shared.
+ */
+export function textTemplate(texts: string[]): string | null {
+  const samples = texts.map(tokens).filter((words) => words.length > 0);
+  if (samples.length < 2) return null;
+  let common = samples[0];
+  for (const words of samples.slice(1)) {
+    common = longestCommonSubsequence(common, words);
+    if (common.length === 0) return null;
+  }
+  const gaps = new Array<boolean>(common.length + 1).fill(false);
+  for (const words of samples) {
+    filledGaps(words, common).forEach((filled, index) => {
+      if (filled) gaps[index] = true;
+    });
+  }
+  const parts: string[] = [];
+  common.forEach((word, index) => {
+    if (gaps[index]) parts.push("{…}");
+    parts.push(word);
+  });
+  if (gaps[common.length]) parts.push("{…}");
+  return parts.join(" ");
+}

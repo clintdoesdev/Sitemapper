@@ -92,10 +92,15 @@ export function normalizeDomain(input: string): string {
 
 type FetchOk = { ok: true; url: string; status: number; contentType: string; text: string };
 type FetchFail = { ok: false; reason: "network" | "timeout" | "blocked" };
-type FetchOutcome = FetchOk | FetchFail;
+export type FetchOutcome = FetchOk | FetchFail;
 
-class Budget {
-  private readonly deadline = Date.now() + TIME_BUDGET_MS;
+/** A shared deadline for every request made while handling one API call. */
+export class Budget {
+  private readonly deadline: number;
+
+  constructor(ms: number = TIME_BUDGET_MS) {
+    this.deadline = Date.now() + ms;
+  }
 
   remaining(): number {
     return this.deadline - Date.now();
@@ -106,7 +111,7 @@ class Budget {
   }
 }
 
-async function fetchText(url: string, budget: Budget): Promise<FetchOutcome> {
+export async function fetchText(url: string, budget: Budget): Promise<FetchOutcome> {
   const timeout = Math.min(REQUEST_TIMEOUT_MS, budget.remaining());
   if (timeout <= 0) return { ok: false, reason: "timeout" };
   try {
@@ -227,17 +232,44 @@ export function parseRobots(text: string, origin: string): Robots {
 // Sitemaps
 // ---------------------------------------------------------------------------
 
-function decodeEntities(value: string): string {
-  return value.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (whole, entity: string) => {
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+  ndash: "\u2013",
+  mdash: "\u2014",
+  lsquo: "\u2018",
+  rsquo: "\u2019",
+  ldquo: "\u201c",
+  rdquo: "\u201d",
+  hellip: "\u2026",
+  middot: "\u00b7",
+  bull: "\u2022",
+  copy: "\u00a9",
+  reg: "\u00ae",
+  trade: "\u2122",
+  euro: "\u20ac",
+  pound: "\u00a3",
+  times: "\u00d7",
+  laquo: "\u00ab",
+  raquo: "\u00bb",
+};
+
+export function decodeEntities(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi, (whole, entity: string) => {
     const lower = entity.toLowerCase();
-    if (lower.startsWith("#x")) return String.fromCodePoint(parseInt(lower.slice(2), 16));
-    if (lower.startsWith("#")) return String.fromCodePoint(parseInt(lower.slice(1), 10));
-    const named: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
-    return named[lower] ?? whole;
+    if (lower.startsWith("#")) {
+      const code = lower.startsWith("#x") ? parseInt(lower.slice(2), 16) : parseInt(lower.slice(1), 10);
+      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : whole;
+    }
+    return NAMED_ENTITIES[lower] ?? whole;
   });
 }
 
-function toHttpUrl(value: string, base?: string): string | null {
+export function toHttpUrl(value: string, base?: string): string | null {
   try {
     const url = new URL(value, base);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;

@@ -1,6 +1,6 @@
 // Run with: npm run test:patterns
 import assert from "node:assert/strict";
-import { groupByPattern } from "../lib/patterns.ts";
+import { groupByPattern, textTemplate } from "../lib/patterns.ts";
 
 const base = "https://example.com";
 
@@ -58,5 +58,18 @@ assert.deepEqual(
   patternCounts([`${base}/news-and-match-previews`, `${base}/news-and-match-previews/x`]),
   { "/news-and-match-previews": 1, "/news-and-match-previews/*": 1 },
 );
+
+// Title templates keep the shared words and mark what changes.
+assert.equal(
+  textTemplate([
+    "Arsenal vs Chelsea Prediction, Tips & Odds | Tiporacle",
+    "Inter vs Milan Prediction, Tips & Odds | Tiporacle",
+    "Real Madrid vs Barcelona Prediction, Tips & Odds | Tiporacle",
+  ]),
+  "{…} vs {…} Prediction, Tips & Odds | Tiporacle",
+);
+assert.equal(textTemplate(["About us", "About us"]), "About us");
+assert.equal(textTemplate(["Alpha", "Beta"]), null);
+assert.equal(textTemplate(["Only one"]), null);
 
 console.log("All pattern tests passed.");
