@@ -12,12 +12,14 @@ function error(message: string, status: number) {
 export async function POST(request: Request) {
   let urls: string[] = [];
   let render = false;
+  let gentle = false;
   try {
     const body: unknown = await request.json();
     if (body && typeof body === "object" && "urls" in body && Array.isArray(body.urls)) {
       urls = body.urls.filter((url): url is string => typeof url === "string");
     }
     if (body && typeof body === "object" && "render" in body) render = body.render === true;
+    if (body && typeof body === "object" && "gentle" in body) gentle = body.gentle === true;
   } catch {
     // Treated as an empty list below.
   }
@@ -28,7 +30,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    return NextResponse.json({ pages: await extractPages(urls, { render }) });
+    return NextResponse.json({ pages: await extractPages(urls, { render, gentle }) });
   } catch (err) {
     console.error(err);
     const detail = err instanceof Error && err.message ? ` (${err.message})` : "";

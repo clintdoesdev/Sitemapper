@@ -93,7 +93,15 @@ export function normalizeDomain(input: string): string {
 // Fetching
 // ---------------------------------------------------------------------------
 
-type FetchOk = { ok: true; url: string; status: number; contentType: string; text: string };
+type FetchOk = {
+  ok: true;
+  url: string;
+  status: number;
+  contentType: string;
+  text: string;
+  /** Seconds the site asked us to wait, from a Retry-After header. */
+  retryAfter: number | null;
+};
 type FetchFail = { ok: false; reason: "network" | "timeout" | "blocked" };
 export type FetchOutcome = FetchOk | FetchFail;
 
@@ -114,12 +122,31 @@ export class Budget {
   }
 }
 
-export async function fetchText(url: string, budget: Budget): Promise<FetchOutcome> {
+function parseRetryAfter(value: string | null): number | null {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds);
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? null : Math.max(0, (date - Date.now()) / 1000);
+}
+
+export async function fetchText(
+  url: string,
+  budget: Budget,
+  options: { html?: boolean } = {},
+): Promise<FetchOutcome> {
   const timeout = Math.min(REQUEST_TIMEOUT_MS, budget.remaining());
   if (timeout <= 0) return { ok: false, reason: "timeout" };
+  const headers: Record<string, string> = options.html
+    ? {
+        "User-Agent": USER_AGENT,
+        Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en;q=0.9,*;q=0.5",
+      }
+    : { "User-Agent": USER_AGENT, Accept: "*/*" };
   try {
     const response = await fetch(url, {
-      headers: { "User-Agent": USER_AGENT, Accept: "*/*" },
+      headers,
       redirect: "follow",
       cache: "no-store",
       signal: AbortSignal.timeout(timeout),
@@ -139,6 +166,7 @@ export async function fetchText(url: string, budget: Budget): Promise<FetchOutco
       status: response.status,
       contentType: response.headers.get("content-type") ?? "",
       text: new TextDecoder().decode(bytes),
+      retryAfter: parseRetryAfter(response.headers.get("retry-after")),
     };
   } catch (error) {
     const name = error instanceof Error ? error.name : "";

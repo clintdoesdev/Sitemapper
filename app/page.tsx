@@ -41,7 +41,27 @@ const MAX_EXTRACT_PAGES = 5_000;
 const EXTRACT_CHUNK = 10;
 const RENDER_CHUNK = 4;
 /** Requests in flight at once, for plain reads and for browser renders. */
-const EXTRACT_WORKERS = 3;
+const EXTRACT_WORKERS = 2;
+/** Temporary failures are retried this many times, more slowly each round. */
+const RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
+const RETRY_CHUNK = 5;
+const MAX_PAUSE_MS = 60_000;
+
+/** Waits `ms`, or rejects as soon as `signal` aborts. */
+function wait(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(new DOMException("Aborted", "AbortError"));
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(new DOMException("Aborted", "AbortError"));
+      },
+      { once: true },
+    );
+  });
+}
 const RENDER_WORKERS = 2;
 
 /** Runs `work` over every item with at most `workers` running at once. */
@@ -193,27 +213,28 @@ export default function Home() {
     const listed = visibleGroups.flatMap((group) => group.urls.map((url) => toAbsolute(url, result.origin)));
     const pending = listed.filter((url) => !contentsRef.current.get(url)?.ok);
     const urls = pending.slice(0, MAX_EXTRACT_PAGES);
+    const idle = { rendering: null, retrying: null, error: null, failed: 0 };
     if (urls.length === 0) {
-      setJob({ total: 0, done: 0, rendering: null, state: "done", error: null, skipped: 0 });
+      setJob({ ...idle, total: 0, done: 0, state: "done", skipped: 0 });
       return;
     }
     const controller = new AbortController();
+    const { signal } = controller;
     extractAbort.current = controller;
-    setJob({
-      total: urls.length,
-      done: 0,
-      rendering: null,
-      state: "running",
-      error: null,
-      skipped: pending.length - urls.length,
-    });
+    setJob({ ...idle, total: urls.length, done: 0, state: "running", skipped: pending.length - urls.length });
 
-    const post = async (chunk: string[], render: boolean): Promise<ExtractResult[]> => {
+    // When a site answers 429, every request waits until this time.
+    let pauseUntil = 0;
+    const latest = new Map<string, ExtractResult>();
+
+    const post = async (chunk: string[], options: { render?: boolean; gentle?: boolean } = {}) => {
+      const delay = pauseUntil - Date.now();
+      if (delay > 0) await wait(delay, signal);
       const response = await fetch("/api/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls: chunk, render }),
-        signal: controller.signal,
+        body: JSON.stringify({ urls: chunk, ...options }),
+        signal,
       });
       let data: { pages?: ExtractResult[]; error?: string } | null = null;
       try {
@@ -229,46 +250,77 @@ export default function Home() {
               : `The server returned an error (status ${response.status}). Try again in a minute.`),
         );
       }
-      return data.pages;
+      const pages = data.pages;
+      const limited = pages.filter((page) => !page.ok && page.rateLimited);
+      if (limited.length > 0) {
+        const asked = Math.max(0, ...limited.map((page) => (!page.ok && page.retryAfter) || 0)) * 1000;
+        // Wait as long as the site asked, or 10 seconds when it didn't say.
+        pauseUntil = Math.max(pauseUntil, Date.now() + Math.min(asked > 0 ? asked : 10_000, MAX_PAUSE_MS));
+      }
+      return pages;
     };
-    const store = (pages: ExtractResult[]) =>
+    const store = (pages: ExtractResult[]) => {
+      for (const page of pages) latest.set(page.url, page);
       setContents((current) => {
         const next = new Map(current);
         for (const page of pages) next.set(page.url, page);
         return next;
       });
+    };
+    const retryable = () =>
+      urls.filter((url) => {
+        const page = latest.get(url);
+        return page !== undefined && !page.ok && page.retryable;
+      });
 
     try {
-      const shells: string[] = [];
       await inPool(chunks(urls, EXTRACT_CHUNK), EXTRACT_WORKERS, async (chunk) => {
-        const pages = await post(chunk, false);
-        store(pages);
-        for (const page of pages) if (page.ok && page.needsRender) shells.push(page.url);
+        store(await post(chunk));
         setJob((current) => current && { ...current, done: current.done + chunk.length });
       });
 
+      // Rate limits, server errors and timeouts are usually temporary: try
+      // those pages again, one at a time and with growing pauses.
+      for (let round = 0; round < RETRY_DELAYS_MS.length; round++) {
+        const again = retryable();
+        if (again.length === 0) break;
+        setJob((current) => current && { ...current, retrying: { round: round + 1, done: 0, total: again.length } });
+        await wait(Math.max(RETRY_DELAYS_MS[round], pauseUntil - Date.now()), signal);
+        await inPool(chunks(again, RETRY_CHUNK), 1, async (chunk) => {
+          store(await post(chunk, { gentle: true }));
+          setJob(
+            (current) =>
+              current && {
+                ...current,
+                retrying: current.retrying && { ...current.retrying, done: current.retrying.done + chunk.length },
+              },
+          );
+        });
+      }
+      setJob((current) => current && { ...current, retrying: null });
+
       // Pages whose HTML is a JavaScript shell get a second read in a browser.
+      const shells = urls.filter((url) => {
+        const page = latest.get(url);
+        return page?.ok && page.needsRender;
+      });
       if (shells.length > 0) {
         setJob((current) => current && { ...current, rendering: { done: 0, total: shells.length } });
         await inPool(chunks(shells, RENDER_CHUNK), RENDER_WORKERS, async (chunk) => {
           let rendered: ExtractResult[];
           try {
-            rendered = await post(chunk, true);
+            rendered = await post(chunk, { render: true });
           } catch (error) {
             if (!(error instanceof ServerError)) throw error;
             const message = error.message;
             rendered = chunk.map((url) => ({ url, ok: false as const, error: message }));
           }
-          setContents((current) => {
-            const next = new Map(current);
-            for (const page of rendered) {
-              const before = current.get(page.url);
-              // Keep the HTML reading when the browser couldn't load the page.
-              if (page.ok || !before?.ok) next.set(page.url, page);
-              else next.set(page.url, { ...before, renderError: page.error });
-            }
-            return next;
+          const merged = rendered.map((page) => {
+            const before = latest.get(page.url);
+            // Keep the HTML reading when the browser couldn't load the page.
+            return page.ok || !before?.ok ? page : { ...before, renderError: page.error };
           });
+          store(merged);
           setJob((current) =>
             current?.rendering
               ? { ...current, rendering: { ...current.rendering, done: current.rendering.done + chunk.length } }
@@ -276,15 +328,27 @@ export default function Home() {
           );
         });
       }
-      setJob((current) => current && { ...current, state: "done" });
+      const failed = urls.filter((url) => !latest.get(url)?.ok).length;
+      setJob((current) => current && { ...current, state: "done", rendering: null, failed });
     } catch (error) {
-      const message = controller.signal.aborted
+      const message = signal.aborted
         ? null
         : error instanceof ServerError
           ? error.message
           : "Couldn't reach the Sitemapper server. Check your connection and try again.";
       controller.abort();
-      setJob((current) => current && { ...current, state: message ? "failed" : "stopped", error: message });
+      const failed = urls.filter((url) => latest.has(url) && !latest.get(url)?.ok).length;
+      setJob(
+        (current) =>
+          current && {
+            ...current,
+            state: message ? "failed" : "stopped",
+            error: message,
+            rendering: null,
+            retrying: null,
+            failed,
+          },
+      );
     } finally {
       if (extractAbort.current === controller) extractAbort.current = null;
     }

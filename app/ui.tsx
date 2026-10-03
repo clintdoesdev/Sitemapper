@@ -103,7 +103,8 @@ export const secondaryButton =
 /** Builds a CSV (header + rows, every cell quoted) and saves it as a download. */
 export function downloadCsv(filename: string, header: string[], rows: string[][]) {
   const lines = [header.join(","), ...rows.map((row) => row.map(csvCell).join(","))];
-  const blob = new Blob([lines.join("\r\n") + "\r\n"], { type: "text/csv;charset=utf-8" });
+  // The byte order mark makes Excel read the file as UTF-8, so dashes and accents survive.
+  const blob = new Blob(["\uFEFF" + lines.join("\r\n") + "\r\n"], { type: "text/csv;charset=utf-8" });
   const href = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = href;

@@ -10,6 +10,10 @@ export type ExtractionJob = {
   done: number;
   /** Second pass that runs JavaScript pages in a browser. */
   rendering: { done: number; total: number } | null;
+  /** Slower passes over pages that failed for temporary reasons. */
+  retrying: { round: number; done: number; total: number } | null;
+  /** Pages in this run that couldn't be read in the end. */
+  failed: number;
   state: "running" | "done" | "stopped" | "failed";
   error: string | null;
   /** Matching pages left out because of the per-run limit. */
@@ -220,7 +224,7 @@ function PageDetails({ page, origin }: { page: ExtractResult; origin: string }) 
                   {page.text}
                 </div>
                 {page.textTruncated && (
-                  <p className="mt-2 text-sm text-muted">Cut at 20,000 characters. The CSV has the same text.</p>
+                  <p className="mt-2 text-sm text-muted">Cut at 32,000 characters, the most a spreadsheet cell can hold. The CSV has the same text.</p>
                 )}
               </>
             ) : (
@@ -240,22 +244,28 @@ function PageDetails({ page, origin }: { page: ExtractResult; origin: string }) 
 /** Progress line, bar and Stop button for the current extraction. */
 export function ExtractionStatus({ job, onStop }: { job: ExtractionJob; onStop: () => void }) {
   const running = job.state === "running";
-  const progress = job.rendering
-    ? job.rendering.done / Math.max(job.rendering.total, 1)
-    : job.done / Math.max(job.total, 1);
+  const phase = job.rendering ?? job.retrying;
+  const progress = phase ? phase.done / Math.max(phase.total, 1) : job.done / Math.max(job.total, 1);
+  const read = job.done - job.failed;
   return (
     <div className="mt-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-sm text-muted" role="status">
           {running && job.rendering
             ? `Running JavaScript on ${formatNumber(job.rendering.done)} of ${plural(job.rendering.total, "page")} that build their content in the browser.`
-            : running
-              ? `Extracting contents of ${formatNumber(job.done)} of ${plural(job.total, "page")}.`
-              : job.state === "stopped"
-                ? `Stopped after ${plural(job.done, "page")}. Extract contents again to continue where it stopped.`
-                : job.state === "failed"
-                  ? `Stopped after ${plural(job.done, "page")}.`
-                  : `Extracted contents of ${plural(job.done, "page")}. Download CSV now includes them.`}
+            : running && job.retrying
+              ? `Trying ${plural(job.retrying.total, "page")} again more slowly, because the site rate-limited or failed to answer (round ${job.retrying.round} of 3, ${formatNumber(job.retrying.done)} done).`
+              : running
+                ? `Extracting contents of ${formatNumber(job.done)} of ${plural(job.total, "page")}.`
+                : job.state === "stopped"
+                  ? `Stopped after ${plural(job.done, "page")}. Extract contents again to continue where it stopped.`
+                  : job.state === "failed"
+                    ? `Stopped after ${plural(job.done, "page")}.`
+                    : `Extracted contents of ${plural(read, "page")}. Download CSV now includes them.`}
+          {!running &&
+            job.state === "done" &&
+            job.failed > 0 &&
+            ` ${formatNumber(job.failed)} couldn't be read; the status column in the CSV says why. Extract contents again to retry them.`}
           {job.skipped > 0 &&
             ` ${formatNumber(job.skipped)} more matching ${job.skipped === 1 ? "page was" : "pages were"} left out, because one run covers ${formatNumber(job.total)} pages. Run it again to continue.`}
         </p>

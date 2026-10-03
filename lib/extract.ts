@@ -14,9 +14,11 @@ export const MAX_EXTRACT_URLS = 10;
 export const MAX_RENDER_URLS = 4;
 const EXTRACT_CONCURRENCY = 4;
 const RENDER_CONCURRENCY = 2;
+const GENTLE_PAUSE_MS = 700;
 const EXTRACT_BUDGET_MS = 45_000;
-const MAX_TEXT_CHARS = 20_000;
-const MAX_HEADINGS = 60;
+// Spreadsheet cells hold at most 32,767 characters.
+export const MAX_TEXT_CHARS = 32_000;
+const MAX_HEADINGS = 200;
 
 export type Heading = { level: number; text: string };
 
@@ -46,7 +48,17 @@ export type PageContents = {
   renderError?: string;
 };
 
-export type PageFailure = { url: string; ok: false; error: string };
+export type PageFailure = {
+  url: string;
+  ok: false;
+  error: string;
+  /** True for temporary failures (rate limits, server errors, timeouts) worth retrying later. */
+  retryable?: boolean;
+  /** Seconds the site asked us to wait before trying again. */
+  retryAfter?: number;
+  /** True when the site answered 429 Too Many Requests. */
+  rateLimited?: boolean;
+};
 
 export type ExtractResult = PageContents | PageFailure;
 
@@ -209,19 +221,46 @@ async function loadRobots(origin: string, budget: Budget): Promise<Robots> {
 }
 
 async function extractOne(url: string, budget: Budget): Promise<ExtractResult> {
-  const response = await fetchText(url, budget);
+  const response = await fetchText(url, budget, { html: true });
   if (!response.ok) {
-    const error =
-      response.reason === "timeout"
-        ? "Took longer than 10 seconds to respond."
-        : response.reason === "blocked"
-          ? "Redirected to a private address."
-          : "The request failed.";
-    return { url, ok: false, error };
+    if (response.reason === "blocked") return { url, ok: false, error: "Redirected to a private address." };
+    return {
+      url,
+      ok: false,
+      retryable: true,
+      error:
+        response.reason === "timeout"
+          ? "Took longer than 10 seconds to respond."
+          : "The connection failed.",
+    };
   }
-  if (response.status >= 400) return { url, ok: false, error: `Returned status ${response.status}.` };
+  const { status } = response;
+  if (status === 429) {
+    return {
+      url,
+      ok: false,
+      retryable: true,
+      rateLimited: true,
+      retryAfter: response.retryAfter ?? undefined,
+      error: "The site asked for fewer requests (status 429).",
+    };
+  }
+  if (status === 401 || status === 403) {
+    return { url, ok: false, error: `The site blocked automated requests (status ${status}).` };
+  }
+  if (status >= 500) {
+    return {
+      url,
+      ok: false,
+      retryable: true,
+      retryAfter: response.retryAfter ?? undefined,
+      error: `The site returned a server error (status ${status}).`,
+    };
+  }
+  if (status >= 400) return { url, ok: false, error: `The page returned status ${status}.` };
   if (!/text\/html|application\/xhtml\+xml/i.test(response.contentType)) {
-    return { url, ok: false, error: "Not an HTML page." };
+    const type = response.contentType.split(";")[0].trim();
+    return { url, ok: false, error: `Not an HTML page${type ? ` (${type})` : ""}.` };
   }
   const contents = extractContents(response.text, response.url);
   return {
@@ -259,7 +298,10 @@ function validate(urls: string[], results: ExtractResult[]): Target[] {
  * Reads pages and extracts their contents, in input order. With `render`,
  * each page is loaded in a headless browser so its JavaScript runs first.
  */
-export async function extractPages(urls: string[], options: { render?: boolean } = {}): Promise<ExtractResult[]> {
+export async function extractPages(
+  urls: string[],
+  options: { render?: boolean; gentle?: boolean } = {},
+): Promise<ExtractResult[]> {
   const budget = new Budget(EXTRACT_BUDGET_MS);
   const results: ExtractResult[] = new Array(urls.length);
   const robotsByOrigin = new Map<string, Promise<Robots>>();
@@ -272,7 +314,9 @@ export async function extractPages(urls: string[], options: { render?: boolean }
     return robots;
   };
   const valid = validate(urls, results);
-  const concurrency = options.render ? RENDER_CONCURRENCY : EXTRACT_CONCURRENCY;
+  // Gentle mode reads one page at a time with a pause, for sites that rate-limit.
+  const concurrency = options.gentle ? 1 : options.render ? RENDER_CONCURRENCY : EXTRACT_CONCURRENCY;
+  const pauseMs = options.gentle ? GENTLE_PAUSE_MS : 0;
 
   const run = async (read: (target: Target) => Promise<ExtractResult>) => {
     for (let start = 0; start < valid.length; start += concurrency) {
@@ -289,6 +333,7 @@ export async function extractPages(urls: string[], options: { render?: boolean }
           results[target.index] = { ...(await read(target)), url: urls[target.index] };
         }),
       );
+      if (pauseMs > 0 && start + concurrency < valid.length) await new Promise((r) => setTimeout(r, pauseMs));
     }
   };
 
