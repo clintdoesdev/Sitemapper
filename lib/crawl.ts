@@ -9,6 +9,9 @@ const SITEMAP_CONCURRENCY = 4;
 const CRAWL_CONCURRENCY = 4;
 const CRAWL_PAUSE_MS = 300;
 const MAX_CRAWL_PAGES = 300;
+const MAX_RENDER_CRAWL_PAGES = 40;
+const RENDER_CRAWL_CONCURRENCY = 3;
+const MIN_RENDER_BUDGET_MS = 8_000;
 const MAX_BODY_BYTES = 60 * 1024 * 1024;
 const DEFAULT_SITEMAP_PATHS = ["/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml", "/wp-sitemap.xml"];
 const ASSET_EXTENSIONS =
@@ -141,6 +144,10 @@ export async function fetchText(url: string, budget: Budget): Promise<FetchOutco
     const name = error instanceof Error ? error.name : "";
     return { ok: false, reason: name === "TimeoutError" || name === "AbortError" ? "timeout" : "network" };
   }
+}
+
+function plural(count: number, word: string): string {
+  return `${count.toLocaleString("en-US")} ${count === 1 ? word : `${word}s`}`;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -384,21 +391,37 @@ function extractLinks(html: string, pageUrl: string): string[] {
   return links;
 }
 
-async function crawlSite(origin: string, robots: Robots, budget: Budget) {
-  const notes: string[] = [];
+/** Rough count of visible words in an HTML document. */
+function visibleWordCount(html: string): number {
+  const text = html
+    .replace(/<(script|style|noscript|template|svg)\b[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<[^>]+>/g, " ");
+  return (decodeEntities(text).match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) ?? []).length;
+}
+
+/** True when HTML is a JavaScript shell: almost no text, but scripts that would build it. */
+export function looksJavaScriptBuilt(html: string, wordCount = visibleWordCount(html)): boolean {
+  return wordCount < 80 && /<script\b[^>]*\bsrc\s*=/i.test(html);
+}
+
+type PageRead = { ok: true; url: string; html: string } | { ok: false; detail: string };
+
+type CrawlMode = {
+  read: (urls: string[]) => Promise<PageRead[]>;
+  maxPages: number;
+  concurrency: number;
+  pauseMs: number;
+};
+
+async function followLinks(origin: string, robots: Robots, budget: Budget, mode: CrawlMode) {
   const pages: string[] = [];
   const siteHost = bareHost(new URL(origin).hostname);
   const homepage = `${origin}/`;
-
-  if (!robots.isAllowed(homepage)) {
-    notes.push("The site's robots.txt doesn't allow crawling its homepage, so no links were followed.");
-    return { pages, truncated: false, notes, homepageFailed: false };
-  }
-
   const seen = new Set<string>([homepage]);
   const queue: string[] = [homepage];
   let fetched = 0;
-  let homepageFailed = false;
+  let homepageFailure: string | null = null;
+  let homepageIsShell = false;
   let stoppedByTime = false;
 
   const enqueue = (url: string) => {
@@ -410,54 +433,138 @@ async function crawlSite(origin: string, robots: Robots, budget: Budget) {
     queue.push(url);
   };
 
-  while (queue.length > 0 && fetched < MAX_CRAWL_PAGES) {
+  while (queue.length > 0 && fetched < mode.maxPages) {
     if (budget.remaining() < 1_000) {
       stoppedByTime = true;
       break;
     }
-    const batch = queue.splice(0, Math.min(CRAWL_CONCURRENCY, MAX_CRAWL_PAGES - fetched));
+    const batch = queue.splice(0, Math.min(mode.concurrency, mode.maxPages - fetched));
     fetched += batch.length;
-    const responses = await Promise.all(batch.map((url) => fetchText(url, budget)));
+    const reads = await mode.read(batch);
 
-    responses.forEach((response, index) => {
+    reads.forEach((read, index) => {
       const isHomepage = batch[index] === homepage;
-      const isHtml =
-        response.ok && response.status < 400 && /text\/html|application\/xhtml\+xml/i.test(response.contentType);
-      if (!response.ok || !isHtml) {
-        if (isHomepage) {
-          homepageFailed = true;
-          const detail = !response.ok
-            ? response.reason === "timeout"
-              ? "it took longer than 10 seconds to respond"
-              : "the request failed"
-            : response.status >= 400
-              ? `it returned status ${response.status}`
-              : "it didn't return an HTML page";
-          notes.push(
-            `The homepage couldn't be loaded because ${detail}. The site probably blocks automated requests, so try another domain.`,
-          );
-        }
+      if (!read.ok) {
+        if (isHomepage) homepageFailure = read.detail;
         return;
       }
-      const finalUrl = toHttpUrl(response.url) ?? batch[index];
+      const finalUrl = toHttpUrl(read.url) ?? batch[index];
       if (bareHost(new URL(finalUrl).hostname) !== siteHost) return;
+      if (isHomepage) homepageIsShell = looksJavaScriptBuilt(read.html);
       seen.add(finalUrl);
       if (!pages.includes(finalUrl)) pages.push(finalUrl);
-      for (const link of extractLinks(response.text, finalUrl)) enqueue(link);
+      for (const link of extractLinks(read.html, finalUrl)) enqueue(link);
     });
 
-    if (queue.length > 0 && fetched < MAX_CRAWL_PAGES) await sleep(CRAWL_PAUSE_MS);
+    if (queue.length > 0 && fetched < mode.maxPages && mode.pauseMs > 0) await sleep(mode.pauseMs);
   }
 
-  const truncated = queue.length > 0;
-  if (truncated) {
+  return {
+    pages,
+    homepageFailure: homepageFailure as string | null,
+    homepageIsShell,
+    truncated: queue.length > 0,
+    stoppedByTime,
+  };
+}
+
+function readWithFetch(budget: Budget) {
+  return (urls: string[]) =>
+    Promise.all(
+      urls.map(async (url): Promise<PageRead> => {
+        const response = await fetchText(url, budget);
+        if (!response.ok) {
+          return {
+            ok: false,
+            detail: response.reason === "timeout" ? "it took longer than 10 seconds to respond" : "the request failed",
+          };
+        }
+        if (response.status >= 400) return { ok: false, detail: `it returned status ${response.status}` };
+        if (!/text\/html|application\/xhtml\+xml/i.test(response.contentType)) {
+          return { ok: false, detail: "it didn't return an HTML page" };
+        }
+        return { ok: true, url: response.url, html: response.text };
+      }),
+    );
+}
+
+async function crawlSite(origin: string, robots: Robots, budget: Budget) {
+  const notes: string[] = [];
+  const homepage = `${origin}/`;
+
+  if (!robots.isAllowed(homepage)) {
+    notes.push("The site's robots.txt doesn't allow crawling its homepage, so no links were followed.");
+    return { pages: [] as string[], truncated: false, notes, rendered: false };
+  }
+
+  const plain = await followLinks(origin, robots, budget, {
+    read: readWithFetch(budget),
+    maxPages: MAX_CRAWL_PAGES,
+    concurrency: CRAWL_CONCURRENCY,
+    pauseMs: CRAWL_PAUSE_MS,
+  });
+
+  // A JavaScript-built homepage, or one that refuses plain requests, gets a
+  // second pass in a real browser so its scripts can run.
+  const tryBrowser =
+    (plain.homepageFailure !== null || (plain.homepageIsShell && plain.pages.length <= 3)) &&
+    budget.remaining() > MIN_RENDER_BUDGET_MS;
+
+  if (tryBrowser) {
+    try {
+      const { renderPage, withBrowser } = await import("./render");
+      const rendered = await withBrowser((browser) =>
+        followLinks(origin, robots, budget, {
+          read: (urls) =>
+            Promise.all(
+              urls.map(async (url): Promise<PageRead> => {
+                const page = await renderPage(browser, url, budget.remaining() - 1_000);
+                return page.ok
+                  ? { ok: true, url: page.url, html: page.html }
+                  : { ok: false, detail: page.error.replace(/\.$/, "").toLowerCase() };
+              }),
+            ),
+          maxPages: MAX_RENDER_CRAWL_PAGES,
+          concurrency: RENDER_CRAWL_CONCURRENCY,
+          pauseMs: 0,
+        }),
+      );
+      if (rendered.pages.length > plain.pages.length) {
+        notes.push(
+          plain.homepageFailure
+            ? `The homepage refused a plain request, so Sitemapper loaded the site in a browser instead and followed links from ${plural(rendered.pages.length, "page")}.`
+            : `The homepage builds its content with JavaScript, so Sitemapper ran it in a browser and followed links from ${plural(rendered.pages.length, "page")}.`,
+        );
+        if (rendered.truncated) {
+          notes.push(
+            rendered.stoppedByTime
+              ? `Stopped after ${TIME_BUDGET_MS / 1000} seconds with links still left to follow, so this is a partial list.`
+              : `Browser crawls stop after ${MAX_RENDER_CRAWL_PAGES} pages, so this is a partial list.`,
+          );
+        }
+        return { pages: rendered.pages, truncated: rendered.truncated, notes, rendered: true };
+      }
+    } catch (error) {
+      console.error(error);
+      notes.push("Sitemapper tried to load the site in a browser, but the browser couldn't start.");
+    }
+  }
+
+  if (plain.homepageFailure) {
     notes.push(
-      stoppedByTime
+      `The homepage couldn't be loaded because ${plain.homepageFailure}. The site probably blocks automated requests, so try another domain.`,
+    );
+  } else if (plain.homepageIsShell && plain.pages.length <= 3 && !tryBrowser) {
+    notes.push("The homepage builds its links with JavaScript, and there wasn't enough time left to run it in a browser.");
+  }
+  if (plain.truncated) {
+    notes.push(
+      plain.stoppedByTime
         ? `Stopped after ${TIME_BUDGET_MS / 1000} seconds with links still left to follow, so this is a partial list.`
         : `Stopped after ${MAX_CRAWL_PAGES} pages with links still left to follow, so this is a partial list.`,
     );
   }
-  return { pages, truncated, notes, homepageFailed };
+  return { pages: plain.pages, truncated: plain.truncated, notes, rendered: false };
 }
 
 // ---------------------------------------------------------------------------

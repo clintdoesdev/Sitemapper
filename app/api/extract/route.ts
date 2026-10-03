@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { extractPages, MAX_EXTRACT_URLS } from "@/lib/extract";
+import { extractPages, MAX_EXTRACT_URLS, MAX_RENDER_URLS } from "@/lib/extract";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -11,24 +11,28 @@ function error(message: string, status: number) {
 
 export async function POST(request: Request) {
   let urls: string[] = [];
+  let render = false;
   try {
     const body: unknown = await request.json();
     if (body && typeof body === "object" && "urls" in body && Array.isArray(body.urls)) {
       urls = body.urls.filter((url): url is string => typeof url === "string");
     }
+    if (body && typeof body === "object" && "render" in body) render = body.render === true;
   } catch {
     // Treated as an empty list below.
   }
   if (urls.length === 0) return error("Send at least one page URL to extract.", 400);
-  if (urls.length > MAX_EXTRACT_URLS) {
-    return error(`Send at most ${MAX_EXTRACT_URLS} URLs per request.`, 400);
+  const limit = render ? MAX_RENDER_URLS : MAX_EXTRACT_URLS;
+  if (urls.length > limit) {
+    return error(`Send at most ${limit} URLs per request${render ? " when rendering JavaScript" : ""}.`, 400);
   }
 
   try {
-    return NextResponse.json({ pages: await extractPages(urls) });
+    return NextResponse.json({ pages: await extractPages(urls, { render }) });
   } catch (err) {
     console.error(err);
     const detail = err instanceof Error && err.message ? ` (${err.message})` : "";
-    return error(`Extracting page contents failed unexpectedly${detail}. Try again in a minute.`, 500);
+    const action = render ? "Rendering pages with JavaScript" : "Extracting page contents";
+    return error(`${action} failed unexpectedly${detail}. Try again in a minute.`, 500);
   }
 }

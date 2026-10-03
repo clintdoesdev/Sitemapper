@@ -1,7 +1,19 @@
-import { blockedHostReason, Budget, decodeEntities, fetchText, parseRobots, toHttpUrl, type Robots } from "./crawl";
+import {
+  blockedHostReason,
+  Budget,
+  decodeEntities,
+  fetchText,
+  looksJavaScriptBuilt,
+  parseRobots,
+  toHttpUrl,
+  type Robots,
+} from "./crawl";
+import { renderPage, withBrowser } from "./render";
 
 export const MAX_EXTRACT_URLS = 10;
+export const MAX_RENDER_URLS = 4;
 const EXTRACT_CONCURRENCY = 4;
+const RENDER_CONCURRENCY = 2;
 const EXTRACT_BUDGET_MS = 45_000;
 const MAX_TEXT_CHARS = 20_000;
 const MAX_HEADINGS = 60;
@@ -26,6 +38,12 @@ export type PageContents = {
   externalLinks: number;
   text: string;
   textTruncated: boolean;
+  /** True when the contents were read after running the page's JavaScript. */
+  rendered: boolean;
+  /** True when the raw HTML looks like a JavaScript shell worth rendering. */
+  needsRender: boolean;
+  /** Why rendering failed, when the HTML reading was kept instead. */
+  renderError?: string;
 };
 
 export type PageFailure = { url: string; ok: false; error: string };
@@ -118,7 +136,10 @@ function schemaTypes(html: string): string[] {
 }
 
 /** Pulls the parts of a page that show how it was built. */
-export function extractContents(html: string, pageUrl: string): Omit<PageContents, "url" | "ok" | "status" | "finalUrl"> {
+export function extractContents(
+  html: string,
+  pageUrl: string,
+): Omit<PageContents, "url" | "ok" | "status" | "finalUrl" | "rendered" | "needsRender"> {
   const metas = tags(html, "meta");
   const meta = (key: string) =>
     collapse(
@@ -180,15 +201,14 @@ export function extractContents(html: string, pageUrl: string): Omit<PageContent
 // Fetching
 // ---------------------------------------------------------------------------
 
-async function robotsFor(origin: string, budget: Budget): Promise<Robots> {
+async function loadRobots(origin: string, budget: Budget): Promise<Robots> {
   const response = await fetchText(`${origin}/robots.txt`, budget);
   const text =
     response.ok && response.status < 400 && !/text\/html/i.test(response.contentType) ? response.text : "";
   return parseRobots(text, origin);
 }
 
-async function extractOne(url: string, robots: Robots, budget: Budget): Promise<ExtractResult> {
-  if (!robots.isAllowed(url)) return { url, ok: false, error: "Blocked by the site's robots.txt." };
+async function extractOne(url: string, budget: Budget): Promise<ExtractResult> {
   const response = await fetchText(url, budget);
   if (!response.ok) {
     const error =
@@ -203,22 +223,22 @@ async function extractOne(url: string, robots: Robots, budget: Budget): Promise<
   if (!/text\/html|application\/xhtml\+xml/i.test(response.contentType)) {
     return { url, ok: false, error: "Not an HTML page." };
   }
+  const contents = extractContents(response.text, response.url);
   return {
     url,
     ok: true,
     status: response.status,
     finalUrl: response.url,
-    ...extractContents(response.text, response.url),
+    ...contents,
+    rendered: false,
+    needsRender: looksJavaScriptBuilt(response.text, contents.wordCount),
   };
 }
 
-/** Fetches up to MAX_EXTRACT_URLS pages and extracts their contents, in input order. */
-export async function extractPages(urls: string[]): Promise<ExtractResult[]> {
-  const budget = new Budget(EXTRACT_BUDGET_MS);
-  const results: ExtractResult[] = new Array(urls.length);
-  const robotsByOrigin = new Map<string, Promise<Robots>>();
+type Target = { index: number; url: string; origin: string };
 
-  const valid: { index: number; url: string; origin: string }[] = [];
+function validate(urls: string[], results: ExtractResult[]): Target[] {
+  const valid: Target[] = [];
   urls.forEach((raw, index) => {
     const url = toHttpUrl(raw);
     if (!url) {
@@ -232,24 +252,65 @@ export async function extractPages(urls: string[]): Promise<ExtractResult[]> {
     }
     valid.push({ index, url, origin: parsed.origin });
   });
+  return valid;
+}
 
-  for (let start = 0; start < valid.length; start += EXTRACT_CONCURRENCY) {
-    const batch = valid.slice(start, start + EXTRACT_CONCURRENCY);
-    await Promise.all(
-      batch.map(async ({ index, url, origin }) => {
-        if (budget.expired()) {
-          results[index] = { url: urls[index], ok: false, error: "Ran out of time. Try again." };
-          return;
-        }
-        let robots = robotsByOrigin.get(origin);
-        if (!robots) {
-          robots = robotsFor(origin, budget);
-          robotsByOrigin.set(origin, robots);
-        }
-        const result = await extractOne(url, await robots, budget);
-        results[index] = { ...result, url: urls[index] };
-      }),
-    );
+/**
+ * Reads pages and extracts their contents, in input order. With `render`,
+ * each page is loaded in a headless browser so its JavaScript runs first.
+ */
+export async function extractPages(urls: string[], options: { render?: boolean } = {}): Promise<ExtractResult[]> {
+  const budget = new Budget(EXTRACT_BUDGET_MS);
+  const results: ExtractResult[] = new Array(urls.length);
+  const robotsByOrigin = new Map<string, Promise<Robots>>();
+  const robotsFor = (origin: string) => {
+    let robots = robotsByOrigin.get(origin);
+    if (!robots) {
+      robots = loadRobots(origin, budget);
+      robotsByOrigin.set(origin, robots);
+    }
+    return robots;
+  };
+  const valid = validate(urls, results);
+  const concurrency = options.render ? RENDER_CONCURRENCY : EXTRACT_CONCURRENCY;
+
+  const run = async (read: (target: Target) => Promise<ExtractResult>) => {
+    for (let start = 0; start < valid.length; start += concurrency) {
+      await Promise.all(
+        valid.slice(start, start + concurrency).map(async (target) => {
+          if (budget.remaining() < (options.render ? 3_000 : 0)) {
+            results[target.index] = { url: urls[target.index], ok: false, error: "Ran out of time. Try again." };
+            return;
+          }
+          if (!(await robotsFor(target.origin)).isAllowed(target.url)) {
+            results[target.index] = { url: urls[target.index], ok: false, error: "Blocked by the site's robots.txt." };
+            return;
+          }
+          results[target.index] = { ...(await read(target)), url: urls[target.index] };
+        }),
+      );
+    }
+  };
+
+  if (!options.render) {
+    await run(({ url }) => extractOne(url, budget));
+    return results;
   }
+
+  await withBrowser((browser) =>
+    run(async ({ url }) => {
+      const page = await renderPage(browser, url, budget.remaining() - 1_000);
+      if (!page.ok) return { url, ok: false, error: page.error };
+      return {
+        url,
+        ok: true,
+        status: page.status,
+        finalUrl: page.url,
+        ...extractContents(page.html, page.url),
+        rendered: true,
+        needsRender: false,
+      };
+    }),
+  );
   return results;
 }

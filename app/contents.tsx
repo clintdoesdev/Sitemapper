@@ -11,6 +11,8 @@ export type ExtractionRun = {
   pages: ExtractResult[];
   state: "running" | "done" | "stopped" | "failed";
   error: string | null;
+  /** Progress of the second pass that runs JavaScript pages in a browser. */
+  rendering: { done: number; total: number } | null;
 };
 
 const MAX_COMMON_HEADINGS = 15;
@@ -26,6 +28,7 @@ function normalise(text: string): string {
 type Summary = {
   read: PageContents[];
   failed: number;
+  rendered: number;
   titleTemplate: string | null;
   h1Template: string | null;
   descriptionTemplate: string | null;
@@ -64,6 +67,7 @@ function summarise(run: ExtractionRun): Summary {
   return {
     read,
     failed: run.pages.length - read.length,
+    rendered: read.filter((page) => page.rendered).length,
     titleTemplate: textTemplate(read.map((page) => page.title)),
     h1Template: textTemplate(read.map((page) => page.h1)),
     descriptionTemplate: textTemplate(read.map((page) => page.description)),
@@ -95,6 +99,7 @@ function downloadContents(run: ExtractionRun, host: string) {
     "external_links",
     "schema_types",
     "headings",
+    "read_from",
     "text",
   ];
   const rows = run.pages.map((page) =>
@@ -113,9 +118,10 @@ function downloadContents(run: ExtractionRun, host: string) {
           String(page.externalLinks),
           page.schemaTypes.join("; "),
           page.headings.map((heading) => `H${heading.level}: ${heading.text}`).join(" | "),
+          page.rendered ? "javascript" : "html",
           page.text,
         ]
-      : [page.url, run.pattern, page.error, "", "", "", "", "", "", "", "", "", "", ""],
+      : [page.url, run.pattern, page.error, "", "", "", "", "", "", "", "", "", "", "", ""],
   );
   const slug = run.pattern.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "") || "home";
   downloadCsv(`${host}-${slug}-contents.csv`, header, rows);
@@ -164,7 +170,10 @@ function PageDetails({ page, origin }: { page: ExtractResult; origin: string }) 
           <span className="block truncate font-mono text-[13px]">{path}</span>
           <span className="mt-0.5 block truncate text-sm text-muted">{page.title || "No title"}</span>
         </span>
-        <span className="shrink-0 pl-2 text-sm text-muted tabular-nums">{plural(page.wordCount, "word")}</span>
+        <span className="shrink-0 pl-2 text-right text-sm text-muted tabular-nums">
+          {plural(page.wordCount, "word")}
+          {page.rendered && <span className="block text-xs">JavaScript run</span>}
+        </span>
       </summary>
       <div className="border-t border-rule bg-sheet px-4 py-2">
         <dl className="divide-y divide-rule">
@@ -178,6 +187,13 @@ function PageDetails({ page, origin }: { page: ExtractResult; origin: string }) 
           )}
           {page.robots && <Field label="Robots meta">{page.robots}</Field>}
           {page.schemaTypes.length > 0 && <Field label="Schema types">{page.schemaTypes.join(", ")}</Field>}
+          <Field label="Read from">
+            {page.rendered
+              ? "The page after its JavaScript ran in a browser"
+              : page.renderError
+                ? `The raw HTML. Running its JavaScript failed: ${page.renderError}`
+                : "The raw HTML"}
+          </Field>
           <Field label="Links">
             {formatNumber(page.internalLinks)} internal, {formatNumber(page.externalLinks)} external
           </Field>
@@ -208,7 +224,11 @@ function PageDetails({ page, origin }: { page: ExtractResult; origin: string }) 
                 )}
               </>
             ) : (
-              <span className="text-muted">No readable text. The page may build its content with JavaScript.</span>
+              <span className="text-muted">
+                {page.rendered
+                  ? "No readable text, even after running its JavaScript."
+                  : "No readable text in the HTML."}
+              </span>
             )}
           </Field>
         </dl>
@@ -240,10 +260,15 @@ export function ExtractionRunView({
             {run.pattern}
           </h3>
           <p className="mt-1 text-sm text-muted" role={run.state === "running" ? "status" : undefined}>
-            {run.state === "running"
-              ? `Read ${formatNumber(done)} of ${plural(total, "page")}.`
-              : `Read ${formatNumber(summary.read.length)} of ${plural(total, "page")}.`}
+            {run.state === "running" && run.rendering
+              ? `Running JavaScript on ${formatNumber(run.rendering.done)} of ${plural(run.rendering.total, "page")} that build their content in the browser.`
+              : run.state === "running"
+                ? `Read ${formatNumber(done)} of ${plural(total, "page")}.`
+                : `Read ${formatNumber(summary.read.length)} of ${plural(total, "page")}.`}
             {run.state !== "running" && summary.failed > 0 && ` ${formatNumber(summary.failed)} couldn't be read.`}
+            {run.state !== "running" &&
+              summary.rendered > 0 &&
+              ` ${summary.rendered === 1 ? "1 was" : `${formatNumber(summary.rendered)} were`} read after running JavaScript.`}
             {run.state === "stopped" && " Stopped early."}
           </p>
         </div>
@@ -268,7 +293,18 @@ export function ExtractionRunView({
 
       {run.state === "running" && (
         <div className="mt-4 h-[3px] w-full overflow-hidden rounded-full bg-contour-soft">
-          <div className="h-full rounded-full bg-contour" style={{ width: `${total ? (done / total) * 100 : 0}%` }} />
+          <div
+            className="h-full rounded-full bg-contour"
+            style={{
+              width: `${
+                run.rendering
+                  ? (run.rendering.done / Math.max(run.rendering.total, 1)) * 100
+                  : total
+                    ? (done / total) * 100
+                    : 0
+              }%`,
+            }}
+          />
         </div>
       )}
 

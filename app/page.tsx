@@ -31,6 +31,10 @@ type MapResult = {
 const MAX_RENDERED_URLS = 500;
 const MAX_EXTRACT_PAGES = 100;
 const EXTRACT_CHUNK = 10;
+const RENDER_CHUNK = 4;
+
+/** An error message from the Sitemapper API, safe to show as is. */
+class ServerError extends Error {}
 
 /** Up to `limit` URLs spread evenly across the list, so samples cover the whole pattern. */
 function sample(urls: string[], limit: number): string[] {
@@ -169,41 +173,75 @@ export default function Home() {
       setRuns((current) => current.map((run) => (run.id === id ? change(run) : run)));
 
     setRuns((current) => [
-      { id, pattern: group.pattern, urls, pages: [], state: "running", error: null },
+      { id, pattern: group.pattern, urls, pages: [], state: "running", error: null, rendering: null },
       ...current.filter((run) => run.pattern !== group.pattern),
     ]);
 
-    try {
-      for (let start = 0; start < urls.length; start += EXTRACT_CHUNK) {
-        const chunk = urls.slice(start, start + EXTRACT_CHUNK);
-        const response = await fetch("/api/extract", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ urls: chunk }),
-          signal: controller.signal,
-        });
-        let data: { pages?: ExtractResult[]; error?: string } | null = null;
-        try {
-          data = await response.json();
-        } catch {
-          data = null;
-        }
-        if (!response.ok || !data?.pages) {
-          const message =
-            data?.error ??
+    const post = async (chunk: string[], render: boolean): Promise<ExtractResult[]> => {
+      const response = await fetch("/api/extract", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ urls: chunk, render }),
+        signal: controller.signal,
+      });
+      let data: { pages?: ExtractResult[]; error?: string } | null = null;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok || !data?.pages) {
+        throw new ServerError(
+          data?.error ??
             (response.status === 504
               ? "The site took too long to respond. Try again later."
-              : `The server returned an error (status ${response.status}). Try again in a minute.`);
-          update((run) => ({ ...run, state: "failed", error: message }));
-          return;
-        }
-        const pages = data.pages;
+              : `The server returned an error (status ${response.status}). Try again in a minute.`),
+        );
+      }
+      return data.pages;
+    };
+
+    try {
+      const collected: ExtractResult[] = [];
+      for (let start = 0; start < urls.length; start += EXTRACT_CHUNK) {
+        const pages = await post(urls.slice(start, start + EXTRACT_CHUNK), false);
+        collected.push(...pages);
         update((run) => ({ ...run, pages: [...run.pages, ...pages] }));
       }
+
+      // Pages whose HTML is a JavaScript shell get a second read in a browser.
+      const shells = collected.filter((page) => page.ok && page.needsRender).map((page) => page.url);
+      if (shells.length > 0) {
+        update((run) => ({ ...run, rendering: { done: 0, total: shells.length } }));
+        for (let start = 0; start < shells.length; start += RENDER_CHUNK) {
+          const chunk = shells.slice(start, start + RENDER_CHUNK);
+          let rendered: ExtractResult[];
+          try {
+            rendered = await post(chunk, true);
+          } catch (error) {
+            if (!(error instanceof ServerError)) throw error;
+            const message = error.message;
+            rendered = chunk.map((url) => ({ url, ok: false as const, error: message }));
+          }
+          const byUrl = new Map(rendered.map((page) => [page.url, page]));
+          update((run) => ({
+            ...run,
+            rendering: run.rendering && { ...run.rendering, done: run.rendering.done + chunk.length },
+            pages: run.pages.map((page) => {
+              const next = byUrl.get(page.url);
+              if (!next || !page.ok) return page;
+              // Keep the HTML reading when the browser couldn't load the page.
+              return next.ok ? next : { ...page, renderError: next.error };
+            }),
+          }));
+        }
+      }
       update((run) => ({ ...run, state: "done" }));
-    } catch {
+    } catch (error) {
       if (controller.signal.aborted) {
         update((run) => ({ ...run, state: "stopped" }));
+      } else if (error instanceof ServerError) {
+        update((run) => ({ ...run, state: "failed", error: error.message }));
       } else {
         update((run) => ({
           ...run,
