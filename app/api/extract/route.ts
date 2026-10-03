@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import type { Identity } from "@/lib/crawl";
 import { extractPages, MAX_EXTRACT_URLS, MAX_RENDER_URLS } from "@/lib/extract";
 
 export const runtime = "nodejs";
@@ -13,6 +14,7 @@ export async function POST(request: Request) {
   let urls: string[] = [];
   let render = false;
   let gentle = false;
+  let identity: Identity = "bot";
   try {
     const body: unknown = await request.json();
     if (body && typeof body === "object" && "urls" in body && Array.isArray(body.urls)) {
@@ -20,6 +22,7 @@ export async function POST(request: Request) {
     }
     if (body && typeof body === "object" && "render" in body) render = body.render === true;
     if (body && typeof body === "object" && "gentle" in body) gentle = body.gentle === true;
+    if (body && typeof body === "object" && "identity" in body && body.identity === "browser") identity = "browser";
   } catch {
     // Treated as an empty list below.
   }
@@ -30,7 +33,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    return NextResponse.json({ pages: await extractPages(urls, { render, gentle }) });
+    return NextResponse.json({ pages: await extractPages(urls, { render, gentle, identity }) });
   } catch (err) {
     console.error(err);
     const detail = err instanceof Error && err.message ? ` (${err.message})` : "";

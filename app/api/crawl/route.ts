@@ -1,5 +1,12 @@
 import { NextResponse } from "next/server";
-import { BlockedHostError, CrawlError, InvalidDomainError, mapSite, normalizeDomain } from "@/lib/crawl";
+import {
+  BlockedHostError,
+  CrawlError,
+  InvalidDomainError,
+  mapSite,
+  normalizeDomain,
+  type Identity,
+} from "@/lib/crawl";
 import { groupByPattern } from "@/lib/patterns";
 
 export const runtime = "nodejs";
@@ -30,11 +37,13 @@ function commonOrigin(urls: string[], fallback: string): string {
 
 export async function POST(request: Request) {
   let domain = "";
+  let identity: Identity = "bot";
   try {
     const body: unknown = await request.json();
     if (body && typeof body === "object" && "domain" in body && typeof body.domain === "string") {
       domain = body.domain;
     }
+    if (body && typeof body === "object" && "identity" in body && body.identity === "browser") identity = "browser";
   } catch {
     // Treated as an empty domain below.
   }
@@ -49,7 +58,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await mapSite(origin);
+    const result = await mapSite(origin, identity);
     const siteOrigin = commonOrigin(result.urls, result.origin);
     // URLs on the main origin are sent as paths to keep the response small.
     const groups = groupByPattern(result.urls).map((group) => ({

@@ -38,7 +38,9 @@ This uses two extra dependencies, [`puppeteer-core`](https://pptr.dev) and [`@sp
 
 When a limit is reached, the results say so. Sites behind bot protection (Cloudflare challenges and similar) often block the crawler. Sitemapper tells you when the homepage couldn't be loaded.
 
-Requests identify themselves as `SitemapperBot/1.0 (site structure study tool)`. Local and private addresses (localhost, `*.local`, `*.internal`, private IP ranges, IPv6 literals) are rejected.
+Requests identify themselves as `SitemapperBot/1.0 (site structure study tool)` by default.
+
+Some sites refuse anything that looks like a tool. For those, tick **Send requests as a regular browser** under the domain field. Mapping and extracting then send a standard desktop Chrome user agent and browser headers, and pages that still come back blocked (401/403) get a second try in the headless browser. robots.txt and the rate-limit pauses still apply. It won't get past challenge pages such as Cloudflare's "checking your browser" screen or CAPTCHAs. Local and private addresses (localhost, `*.local`, `*.internal`, private IP ranges, IPv6 literals) are rejected.
 
 ## Run locally
 

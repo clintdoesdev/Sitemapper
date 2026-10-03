@@ -1,6 +1,19 @@
 import { gunzipSync } from "node:zlib";
 
-const USER_AGENT = "SitemapperBot/1.0 (site structure study tool)";
+/**
+ * How requests identify themselves. "bot" announces Sitemapper; "browser"
+ * sends the user agent and headers of a regular desktop Chrome, for sites
+ * that refuse anything that looks like a tool.
+ */
+export type Identity = "bot" | "browser";
+
+export const BOT_USER_AGENT = "SitemapperBot/1.0 (site structure study tool)";
+export const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
+
+export function userAgentFor(identity: Identity): string {
+  return identity === "browser" ? BROWSER_USER_AGENT : BOT_USER_AGENT;
+}
 const REQUEST_TIMEOUT_MS = 10_000;
 const TIME_BUDGET_MS = 50_000;
 const MAX_SITEMAPS = 60;
@@ -105,12 +118,14 @@ type FetchOk = {
 type FetchFail = { ok: false; reason: "network" | "timeout" | "blocked" };
 export type FetchOutcome = FetchOk | FetchFail;
 
-/** A shared deadline for every request made while handling one API call. */
+/** A shared deadline, and identity, for every request made while handling one API call. */
 export class Budget {
   private readonly deadline: number;
+  readonly identity: Identity;
 
-  constructor(ms: number = TIME_BUDGET_MS) {
+  constructor(ms: number = TIME_BUDGET_MS, identity: Identity = "bot") {
     this.deadline = Date.now() + ms;
+    this.identity = identity;
   }
 
   remaining(): number {
@@ -137,13 +152,21 @@ export async function fetchText(
 ): Promise<FetchOutcome> {
   const timeout = Math.min(REQUEST_TIMEOUT_MS, budget.remaining());
   if (timeout <= 0) return { ok: false, reason: "timeout" };
-  const headers: Record<string, string> = options.html
-    ? {
-        "User-Agent": USER_AGENT,
-        Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en;q=0.9,*;q=0.5",
-      }
-    : { "User-Agent": USER_AGENT, Accept: "*/*" };
+  const asBrowser = budget.identity === "browser";
+  const headers: Record<string, string> = {
+    "User-Agent": userAgentFor(budget.identity),
+    Accept:
+      options.html || asBrowser
+        ? "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+        : "*/*",
+    "Accept-Language": asBrowser ? "en-US,en;q=0.9" : "en;q=0.9,*;q=0.5",
+  };
+  if (asBrowser) {
+    headers["Upgrade-Insecure-Requests"] = "1";
+    headers["Sec-Fetch-Dest"] = "document";
+    headers["Sec-Fetch-Mode"] = "navigate";
+    headers["Sec-Fetch-Site"] = "none";
+  }
   try {
     const response = await fetch(url, {
       headers,
@@ -546,7 +569,7 @@ async function crawlSite(origin: string, robots: Robots, budget: Budget) {
           read: (urls) =>
             Promise.all(
               urls.map(async (url): Promise<PageRead> => {
-                const page = await renderPage(browser, url, budget.remaining() - 1_000);
+                const page = await renderPage(browser, url, budget.remaining() - 1_000, budget.identity);
                 return page.ok
                   ? { ok: true, url: page.url, html: page.html }
                   : { ok: false, detail: page.error.replace(/\.$/, "").toLowerCase() };
@@ -599,8 +622,8 @@ async function crawlSite(origin: string, robots: Robots, budget: Budget) {
 // Entry point
 // ---------------------------------------------------------------------------
 
-export async function mapSite(origin: string): Promise<CrawlResult> {
-  const budget = new Budget();
+export async function mapSite(origin: string, identity: Identity = "bot"): Promise<CrawlResult> {
+  const budget = new Budget(undefined, identity);
   const host = new URL(origin).hostname;
   const notes: string[] = [];
 

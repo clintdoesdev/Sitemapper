@@ -112,6 +112,8 @@ function Contours() {
 
 export default function Home() {
   const [domain, setDomain] = useState("");
+  // Off by default: requests announce themselves as SitemapperBot.
+  const [asBrowser, setAsBrowser] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<MapResult | null>(null);
@@ -175,7 +177,7 @@ export default function Home() {
       const response = await fetch("/api/crawl", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domain }),
+        body: JSON.stringify({ domain, identity: asBrowser ? "browser" : "bot" }),
       });
       let data: (Partial<MapResult> & { error?: string }) | null = null;
       try {
@@ -223,6 +225,7 @@ export default function Home() {
     extractAbort.current = controller;
     setJob({ ...idle, total: urls.length, done: 0, state: "running", skipped: pending.length - urls.length });
 
+    const identity = asBrowser ? "browser" : "bot";
     // When a site answers 429, every request waits until this time.
     let pauseUntil = 0;
     const latest = new Map<string, ExtractResult>();
@@ -233,7 +236,7 @@ export default function Home() {
       const response = await fetch("/api/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls: chunk, ...options }),
+        body: JSON.stringify({ urls: chunk, identity, ...options }),
         signal,
       });
       let data: { pages?: ExtractResult[]; error?: string } | null = null;
@@ -299,10 +302,12 @@ export default function Home() {
       }
       setJob((current) => current && { ...current, retrying: null });
 
-      // Pages whose HTML is a JavaScript shell get a second read in a browser.
+      // Pages whose HTML is a JavaScript shell get a second read in a browser,
+      // and so do blocked pages when requests are sent as a regular browser.
       const shells = urls.filter((url) => {
         const page = latest.get(url);
-        return page?.ok && page.needsRender;
+        if (!page) return false;
+        return page.ok ? page.needsRender : identity === "browser" && page.blocked === true;
       });
       if (shells.length > 0) {
         setJob((current) => current && { ...current, rendering: { done: 0, total: shells.length } });
@@ -440,6 +445,22 @@ export default function Home() {
               {loading ? "Mapping…" : "Map site"}
             </button>
           </form>
+
+          <label className="relative mt-4 flex max-w-[52ch] cursor-pointer items-start gap-3 text-sm text-ink">
+            <input
+              type="checkbox"
+              checked={asBrowser}
+              onChange={(event) => setAsBrowser(event.target.checked)}
+              className="mt-0.5 size-4 shrink-0 accent-contour"
+            />
+            <span>
+              Send requests as a regular browser
+              <span className="mt-0.5 block text-muted">
+                For sites that block tools. Uses a standard Chrome identity instead of SitemapperBot, and retries
+                blocked pages in a real browser. Applies to mapping and extracting.
+              </span>
+            </span>
+          </label>
 
           {loading && (
             <div role="status" className="relative mt-6">

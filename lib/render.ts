@@ -1,7 +1,5 @@
 import type { Browser, HTTPRequest } from "puppeteer-core";
-import { blockedHostReason } from "./crawl";
-
-const USER_AGENT = "SitemapperBot/1.0 (site structure study tool)";
+import { blockedHostReason, userAgentFor, type Identity } from "./crawl";
 const NAVIGATION_TIMEOUT_MS = 15_000;
 const SETTLE_TIMEOUT_MS = 4_000;
 const SKIPPED_RESOURCES = new Set(["image", "media", "font", "stylesheet"]);
@@ -71,10 +69,16 @@ function isAllowedRequest(request: HTTPRequest): boolean {
 }
 
 /** Loads a page in the browser, lets its JavaScript run, and returns the resulting HTML. */
-export async function renderPage(browser: Browser, url: string, timeoutMs: number): Promise<RenderedPage> {
+export async function renderPage(
+  browser: Browser,
+  url: string,
+  timeoutMs: number,
+  identity: Identity = "bot",
+): Promise<RenderedPage> {
   const page = await browser.newPage();
   try {
-    await page.setUserAgent(USER_AGENT);
+    await page.setUserAgent(userAgentFor(identity));
+    if (identity === "browser") await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
     await page.setRequestInterception(true);
     page.on("request", (request) => {
       if (request.isInterceptResolutionHandled()) return;

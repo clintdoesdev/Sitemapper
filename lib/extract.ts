@@ -2,6 +2,7 @@ import {
   blockedHostReason,
   Budget,
   decodeEntities,
+  type Identity,
   fetchText,
   looksJavaScriptBuilt,
   parseRobots,
@@ -58,6 +59,8 @@ export type PageFailure = {
   retryAfter?: number;
   /** True when the site answered 429 Too Many Requests. */
   rateLimited?: boolean;
+  /** True when the site refused the request (401/403), so a real browser may get further. */
+  blocked?: boolean;
 };
 
 export type ExtractResult = PageContents | PageFailure;
@@ -246,7 +249,7 @@ async function extractOne(url: string, budget: Budget): Promise<ExtractResult> {
     };
   }
   if (status === 401 || status === 403) {
-    return { url, ok: false, error: `The site blocked automated requests (status ${status}).` };
+    return { url, ok: false, blocked: true, error: `The site blocked automated requests (status ${status}).` };
   }
   if (status >= 500) {
     return {
@@ -300,9 +303,9 @@ function validate(urls: string[], results: ExtractResult[]): Target[] {
  */
 export async function extractPages(
   urls: string[],
-  options: { render?: boolean; gentle?: boolean } = {},
+  options: { render?: boolean; gentle?: boolean; identity?: Identity } = {},
 ): Promise<ExtractResult[]> {
-  const budget = new Budget(EXTRACT_BUDGET_MS);
+  const budget = new Budget(EXTRACT_BUDGET_MS, options.identity);
   const results: ExtractResult[] = new Array(urls.length);
   const robotsByOrigin = new Map<string, Promise<Robots>>();
   const robotsFor = (origin: string) => {
@@ -344,7 +347,7 @@ export async function extractPages(
 
   await withBrowser((browser) =>
     run(async ({ url }) => {
-      const page = await renderPage(browser, url, budget.remaining() - 1_000);
+      const page = await renderPage(browser, url, budget.remaining() - 1_000, budget.identity);
       if (!page.ok) return { url, ok: false, error: page.error };
       return {
         url,
