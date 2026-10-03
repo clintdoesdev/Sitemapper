@@ -7,16 +7,23 @@ import {
   copyText,
   CopyIcon,
   DownloadIcon,
+  ExtractIcon,
   downloadCsv,
   formatNumber,
   plural,
   secondaryButton,
   toAbsolute,
+  type Group,
 } from "./ui";
-import { ExtractionRunView, type ExtractionRun } from "./contents";
+import {
+  CONTENT_CSV_HEADER,
+  contentCsvCells,
+  ContentsSection,
+  ExtractionStatus,
+  type ContentsMap,
+  type ExtractionJob,
+} from "./contents";
 import type { ExtractResult } from "@/lib/extract";
-
-type Group = { pattern: string; count: number; urls: string[] };
 
 type MapResult = {
   origin: string;
@@ -29,18 +36,32 @@ type MapResult = {
 };
 
 const MAX_RENDERED_URLS = 500;
-const MAX_EXTRACT_PAGES = 100;
+/** Most pages one extraction run covers; running again continues with the rest. */
+const MAX_EXTRACT_PAGES = 5_000;
 const EXTRACT_CHUNK = 10;
 const RENDER_CHUNK = 4;
+/** Requests in flight at once, for plain reads and for browser renders. */
+const EXTRACT_WORKERS = 3;
+const RENDER_WORKERS = 2;
+
+/** Runs `work` over every item with at most `workers` running at once. */
+async function inPool<T>(items: T[], workers: number, work: (item: T) => Promise<void>) {
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(workers, items.length) }, async () => {
+      while (next < items.length) await work(items[next++]);
+    }),
+  );
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  return Array.from({ length: Math.ceil(items.length / size) }, (_, index) =>
+    items.slice(index * size, index * size + size),
+  );
+}
 
 /** An error message from the Sitemapper API, safe to show as is. */
 class ServerError extends Error {}
-
-/** Up to `limit` URLs spread evenly across the list, so samples cover the whole pattern. */
-function sample(urls: string[], limit: number): string[] {
-  if (urls.length <= limit) return urls;
-  return Array.from({ length: limit }, (_, index) => urls[Math.floor((index * urls.length) / limit)]);
-}
 
 const CONTOURS = [
   "M373.9 230.0C374.8 234.5 371.6 240.1 368.8 244.6C366.0 249.0 362.3 254.3 357.2 256.6C352.1 258.8 344.0 257.8 338.2 257.9C332.3 258.0 328.1 257.3 322.1 257.2C316.0 257.1 306.9 259.5 302.1 257.3C297.4 255.0 295.0 248.2 293.6 243.7C292.2 239.1 293.6 234.6 293.6 230.0C293.7 225.4 291.8 220.5 293.7 216.4C295.5 212.2 300.3 208.7 304.7 205.3C309.1 201.8 314.1 196.8 319.9 195.5C325.7 194.2 334.6 195.0 339.5 197.5C344.5 200.0 345.8 207.4 349.7 210.7C353.6 214.1 359.1 214.4 363.1 217.6C367.1 220.8 372.9 225.5 373.9 230.0Z",
@@ -79,10 +100,12 @@ export default function Home() {
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [runs, setRuns] = useState<ExtractionRun[]>([]);
+  const [contents, setContents] = useState<ContentsMap>(new Map());
+  const contentsRef = useRef<ContentsMap>(contents);
+  contentsRef.current = contents;
+  const [job, setJob] = useState<ExtractionJob | null>(null);
   const extractAbort = useRef<AbortController | null>(null);
-  const nextRunId = useRef(1);
-  const extracting = runs.some((run) => run.state === "running");
+  const extracting = job?.state === "running";
 
   const deferredFilter = useDeferredValue(filter);
 
@@ -155,7 +178,8 @@ export default function Home() {
       setCopied(false);
       setCopyError(null);
       extractAbort.current?.abort();
-      setRuns([]);
+      setContents(new Map());
+      setJob(null);
     } catch {
       setError("Couldn't reach the Sitemapper server. Check your connection and try again.");
     } finally {
@@ -163,19 +187,26 @@ export default function Home() {
     }
   }
 
-  async function extractGroup(group: Group) {
+  /** Extracts the contents of every listed page not extracted yet. */
+  async function extractContents() {
     if (!result || extracting) return;
-    const urls = sample(group.urls, MAX_EXTRACT_PAGES).map((url) => toAbsolute(url, result.origin));
-    const id = nextRunId.current++;
+    const listed = visibleGroups.flatMap((group) => group.urls.map((url) => toAbsolute(url, result.origin)));
+    const pending = listed.filter((url) => !contentsRef.current.get(url)?.ok);
+    const urls = pending.slice(0, MAX_EXTRACT_PAGES);
+    if (urls.length === 0) {
+      setJob({ total: 0, done: 0, rendering: null, state: "done", error: null, skipped: 0 });
+      return;
+    }
     const controller = new AbortController();
     extractAbort.current = controller;
-    const update = (change: (run: ExtractionRun) => ExtractionRun) =>
-      setRuns((current) => current.map((run) => (run.id === id ? change(run) : run)));
-
-    setRuns((current) => [
-      { id, pattern: group.pattern, urls, pages: [], state: "running", error: null, rendering: null },
-      ...current.filter((run) => run.pattern !== group.pattern),
-    ]);
+    setJob({
+      total: urls.length,
+      done: 0,
+      rendering: null,
+      state: "running",
+      error: null,
+      skipped: pending.length - urls.length,
+    });
 
     const post = async (chunk: string[], render: boolean): Promise<ExtractResult[]> => {
       const response = await fetch("/api/extract", {
@@ -200,21 +231,26 @@ export default function Home() {
       }
       return data.pages;
     };
+    const store = (pages: ExtractResult[]) =>
+      setContents((current) => {
+        const next = new Map(current);
+        for (const page of pages) next.set(page.url, page);
+        return next;
+      });
 
     try {
-      const collected: ExtractResult[] = [];
-      for (let start = 0; start < urls.length; start += EXTRACT_CHUNK) {
-        const pages = await post(urls.slice(start, start + EXTRACT_CHUNK), false);
-        collected.push(...pages);
-        update((run) => ({ ...run, pages: [...run.pages, ...pages] }));
-      }
+      const shells: string[] = [];
+      await inPool(chunks(urls, EXTRACT_CHUNK), EXTRACT_WORKERS, async (chunk) => {
+        const pages = await post(chunk, false);
+        store(pages);
+        for (const page of pages) if (page.ok && page.needsRender) shells.push(page.url);
+        setJob((current) => current && { ...current, done: current.done + chunk.length });
+      });
 
       // Pages whose HTML is a JavaScript shell get a second read in a browser.
-      const shells = collected.filter((page) => page.ok && page.needsRender).map((page) => page.url);
       if (shells.length > 0) {
-        update((run) => ({ ...run, rendering: { done: 0, total: shells.length } }));
-        for (let start = 0; start < shells.length; start += RENDER_CHUNK) {
-          const chunk = shells.slice(start, start + RENDER_CHUNK);
+        setJob((current) => current && { ...current, rendering: { done: 0, total: shells.length } });
+        await inPool(chunks(shells, RENDER_CHUNK), RENDER_WORKERS, async (chunk) => {
           let rendered: ExtractResult[];
           try {
             rendered = await post(chunk, true);
@@ -223,32 +259,32 @@ export default function Home() {
             const message = error.message;
             rendered = chunk.map((url) => ({ url, ok: false as const, error: message }));
           }
-          const byUrl = new Map(rendered.map((page) => [page.url, page]));
-          update((run) => ({
-            ...run,
-            rendering: run.rendering && { ...run.rendering, done: run.rendering.done + chunk.length },
-            pages: run.pages.map((page) => {
-              const next = byUrl.get(page.url);
-              if (!next || !page.ok) return page;
+          setContents((current) => {
+            const next = new Map(current);
+            for (const page of rendered) {
+              const before = current.get(page.url);
               // Keep the HTML reading when the browser couldn't load the page.
-              return next.ok ? next : { ...page, renderError: next.error };
-            }),
-          }));
-        }
+              if (page.ok || !before?.ok) next.set(page.url, page);
+              else next.set(page.url, { ...before, renderError: page.error });
+            }
+            return next;
+          });
+          setJob((current) =>
+            current?.rendering
+              ? { ...current, rendering: { ...current.rendering, done: current.rendering.done + chunk.length } }
+              : current,
+          );
+        });
       }
-      update((run) => ({ ...run, state: "done" }));
+      setJob((current) => current && { ...current, state: "done" });
     } catch (error) {
-      if (controller.signal.aborted) {
-        update((run) => ({ ...run, state: "stopped" }));
-      } else if (error instanceof ServerError) {
-        update((run) => ({ ...run, state: "failed", error: error.message }));
-      } else {
-        update((run) => ({
-          ...run,
-          state: "failed",
-          error: "Couldn't reach the Sitemapper server. Check your connection and try again.",
-        }));
-      }
+      const message = controller.signal.aborted
+        ? null
+        : error instanceof ServerError
+          ? error.message
+          : "Couldn't reach the Sitemapper server. Check your connection and try again.";
+      controller.abort();
+      setJob((current) => current && { ...current, state: message ? "failed" : "stopped", error: message });
     } finally {
       if (extractAbort.current === controller) extractAbort.current = null;
     }
@@ -285,10 +321,16 @@ export default function Home() {
 
   function handleDownload() {
     if (!result) return;
+    const withContents = contents.size > 0;
     const rows = visibleGroups.flatMap((group) =>
-      group.urls.map((url) => [toAbsolute(url, result.origin), group.pattern]),
+      group.urls.map((url) => {
+        const absolute = toAbsolute(url, result.origin);
+        const row = [absolute, group.pattern];
+        return withContents ? [...row, ...contentCsvCells(contents.get(absolute))] : row;
+      }),
     );
-    downloadCsv(`${host}-pages.csv`, ["url", "pattern"], rows);
+    const header = withContents ? ["url", "pattern", ...CONTENT_CSV_HEADER] : ["url", "pattern"];
+    downloadCsv(`${host}-pages.csv`, header, rows);
   }
 
   return (
@@ -371,7 +413,7 @@ export default function Home() {
 
             {result.total > 0 && (
               <>
-                <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center">
+                <div className="mt-8 flex flex-col gap-3">
                   <label htmlFor="filter" className="sr-only">
                     Filter URLs
                   </label>
@@ -385,9 +427,9 @@ export default function Home() {
                     placeholder="Filter URLs, like premier-league"
                     value={filter}
                     onChange={(event) => setFilter(event.target.value)}
-                    className="h-11 w-full min-w-0 rounded-md sm:flex-1 border border-rule bg-sheet px-3 text-sm text-ink placeholder:text-muted hover:border-contour/60"
+                    className="h-11 w-full min-w-0 rounded-md border border-rule bg-sheet px-3 text-sm text-ink placeholder:text-muted hover:border-contour/60"
                   />
-                  <div className="flex gap-3">
+                  <div className="flex flex-wrap gap-3">
                     <button
                       type="button"
                       onClick={handleCopy}
@@ -406,8 +448,25 @@ export default function Home() {
                       <DownloadIcon />
                       Download CSV
                     </button>
+                    <button
+                      type="button"
+                      onClick={extractContents}
+                      disabled={visibleTotal === 0 || extracting}
+                      className={secondaryButton}
+                    >
+                      <ExtractIcon />
+                      Extract contents
+                    </button>
                   </div>
                 </div>
+                {job ? (
+                  <ExtractionStatus job={job} onStop={stopExtracting} />
+                ) : (
+                  <p className="mt-3 max-w-[52ch] text-sm text-muted">
+                    Extract contents reads every listed page for its title, description, headings and text, and adds
+                    them to the CSV.
+                  </p>
+                )}
 
                 <div aria-live="polite" className="text-sm text-muted">
                   {copyError && <p className="mt-3 border-l-2 border-alert pl-3 text-ink">{copyError}</p>}
@@ -453,36 +512,10 @@ export default function Home() {
                             </span>
                           </button>
                           {isOpen && (
-                            <div id={panelId} className="border-t border-rule bg-sheet">
-                              <div className="flex flex-col gap-3 border-b border-rule px-4 py-3 sm:flex-row sm:items-center">
-                                <button
-                                  type="button"
-                                  onClick={() => extractGroup(group)}
-                                  disabled={extracting}
-                                  className={secondaryButton}
-                                >
-                                  Extract contents
-                                </button>
-                                <p className="text-sm text-muted">
-                                  {(() => {
-                                    const run = runs.find((r) => r.pattern === group.pattern);
-                                    if (run?.state === "running") {
-                                      return `Reading ${formatNumber(run.pages.length)} of ${plural(run.urls.length, "page")}.`;
-                                    }
-                                    if (run) {
-                                      return (
-                                        <a href={`#contents-${run.id}`} className="text-contour underline">
-                                          View extracted contents
-                                        </a>
-                                      );
-                                    }
-                                    return group.count > MAX_EXTRACT_PAGES
-                                      ? `Reads ${formatNumber(MAX_EXTRACT_PAGES)} of these pages, spread across the pattern, and pulls out titles, headings and text.`
-                                      : `Reads ${group.count === 1 ? "this page" : `these ${formatNumber(group.count)} pages`} and pulls out titles, headings and text.`;
-                                  })()}
-                                </p>
-                              </div>
-                              <div className="max-h-96 overflow-y-auto px-4 py-3">
+                            <div
+                              id={panelId}
+                              className="max-h-96 overflow-y-auto border-t border-rule bg-sheet px-4 py-3"
+                            >
                               <ul className="space-y-0.5">
                                 {shown.map((url) => (
                                   <li key={url}>
@@ -504,7 +537,6 @@ export default function Home() {
                                 </p>
                               )}
                             </div>
-                            </div>
                           )}
                         </li>
                       );
@@ -514,28 +546,7 @@ export default function Home() {
               </>
             )}
 
-            {runs.length > 0 && (
-              <section aria-labelledby="contents-heading" className="mt-14 border-t border-rule pt-10">
-                <h2 id="contents-heading" className="font-display text-3xl font-bold tracking-tight text-ink">
-                  Page contents
-                </h2>
-                <p className="mt-2 max-w-[52ch] text-sm leading-relaxed text-muted">
-                  Templates show the wording the pages share, with {"{…}"} where it changes. Open a page to see
-                  its headings and text.
-                </p>
-                <div className="mt-8 space-y-10">
-                  {runs.map((run) => (
-                    <ExtractionRunView
-                      key={run.id}
-                      run={run}
-                      origin={result.origin}
-                      host={host}
-                      onStop={stopExtracting}
-                    />
-                  ))}
-                </div>
-              </section>
-            )}
+            <ContentsSection groups={visibleGroups} contents={contents} origin={result.origin} />
 
             {result.sitemaps.length > 0 && (
               <details className="mt-10 text-sm">

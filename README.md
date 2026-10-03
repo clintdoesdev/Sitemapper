@@ -8,7 +8,7 @@ Enter any domain and get a list of every page the site publishes, grouped by URL
 2. Reads those sitemaps. If robots.txt lists none, it tries `/sitemap.xml`, `/sitemap_index.xml`, `/sitemap-index.xml` and `/wp-sitemap.xml`. Sitemap indexes are followed breadth-first, and gzipped `.xml.gz` sitemaps are supported.
 3. If no sitemap has any pages, it crawls from the homepage instead. The crawl stays on the same host (www and the bare domain count as one), only reads HTML pages, and respects robots.txt.
 4. Groups the URLs by pattern and shows how many pages each pattern has. You can filter the list, copy the URLs, or download them as CSV (`url,pattern`).
-5. Optionally extracts page contents. Open a pattern and choose **Extract contents** to read up to 100 of its pages (spread evenly across the pattern). For each page you get the title, meta description, H1, canonical, robots meta, headings outline, JSON-LD schema types, internal and external link counts, word count, and the main text (up to 20,000 characters). Across the pattern it shows the shared title, H1 and description templates (for example `{…} vs {…} Prediction | Site`), the word count range, the schema types and the headings most pages share. Download it all as `<host>-<pattern>-contents.csv`.
+5. Optionally extracts page contents. **Extract contents** reads every page in the list (or only the ones matching the filter) and pulls out the title, meta description, H1, canonical, robots meta, headings, JSON-LD schema types, internal and external link counts, word count and main text (up to 20,000 characters). **Download CSV** then includes all of these as extra columns next to each URL. The page also summarises each pattern: the shared title, H1 and description templates (for example `{…} vs {…} Prediction | Site`), the word count range, schema types and the headings most pages share. You can stop at any time; running it again continues with the pages not read yet.
 
 Each request is stateless. There's no database and no login.
 
@@ -17,7 +17,7 @@ Each request is stateless. There's no database and no login.
 Some sites send almost empty HTML and build their pages in the browser with JavaScript. Sitemapper notices this and loads those pages in a headless Chromium browser so the scripts can run:
 
 - **Mapping.** When there's no sitemap and the homepage is a JavaScript shell (fewer than 80 words of text but loads scripts), or it refuses a plain request, the link crawl runs again in the browser. Browser crawls cover up to 40 pages, 3 at a time, within the same 50-second budget.
-- **Extracting contents.** Every page is read as plain HTML first, which is fast. Pages that turn out to be JavaScript shells get a second read in the browser, 4 pages per request. Each page shows whether it was read from the raw HTML or after running JavaScript, and the CSV has a `read_from` column.
+- **Extracting contents.** Every page is read as plain HTML first, which is fast. Pages that turn out to be JavaScript shells get a second read in the browser, 4 pages per request with 2 requests at a time. Each page shows whether it was read from the raw HTML or after running JavaScript, and the CSV has a `read_from` column.
 
 In the browser, images, fonts, media and stylesheets are skipped to save time, and every request the page makes is checked, so a site's scripts can't reach private or local addresses. robots.txt is still respected.
 
@@ -31,7 +31,7 @@ This uses two extra dependencies, [`puppeteer-core`](https://pptr.dev) and [`@sp
 | URLs collected | 50,000 |
 | Pages crawled (when there's no sitemap) | 300, 4 at a time with a 300 ms pause between batches |
 | Time per domain | 50 seconds in total, 10 seconds per request |
-| Content extraction | 100 pages per pattern, sent 10 per request, 4 fetched at a time, robots.txt respected |
+| Content extraction | 5,000 pages per run (run again to continue), 10 per request with 3 requests at a time, robots.txt respected |
 | Browser rendering | 4 pages per request, 2 tabs at a time, 15 seconds per page |
 
 When a limit is reached, the results say so. Sites behind bot protection (Cloudflare challenges and similar) often block the crawler. Sitemapper tells you when the homepage couldn't be loaded.

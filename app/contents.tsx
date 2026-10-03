@@ -2,20 +2,61 @@
 
 import type { ExtractResult, PageContents } from "@/lib/extract";
 import { textTemplate } from "@/lib/patterns";
-import { DownloadIcon, downloadCsv, formatNumber, plural, secondaryButton } from "./ui";
+import { formatNumber, plural, secondaryButton, toAbsolute, type Group } from "./ui";
 
-export type ExtractionRun = {
-  id: number;
-  pattern: string;
-  urls: string[];
-  pages: ExtractResult[];
+/** Progress of the current (or last) extraction. */
+export type ExtractionJob = {
+  total: number;
+  done: number;
+  /** Second pass that runs JavaScript pages in a browser. */
+  rendering: { done: number; total: number } | null;
   state: "running" | "done" | "stopped" | "failed";
   error: string | null;
-  /** Progress of the second pass that runs JavaScript pages in a browser. */
-  rendering: { done: number; total: number } | null;
+  /** Matching pages left out because of the per-run limit. */
+  skipped: number;
 };
 
+export type ContentsMap = ReadonlyMap<string, ExtractResult>;
+
 const MAX_COMMON_HEADINGS = 15;
+const MAX_LISTED_PAGES = 200;
+
+/** Columns added to the CSV export for pages whose contents were extracted. */
+export const CONTENT_CSV_HEADER = [
+  "status",
+  "title",
+  "description",
+  "h1",
+  "canonical",
+  "robots",
+  "word_count",
+  "internal_links",
+  "external_links",
+  "schema_types",
+  "headings",
+  "read_from",
+  "text",
+];
+
+export function contentCsvCells(page: ExtractResult | undefined): string[] {
+  if (!page) return CONTENT_CSV_HEADER.map(() => "");
+  if (!page.ok) return [page.error, ...CONTENT_CSV_HEADER.slice(1).map(() => "")];
+  return [
+    String(page.status),
+    page.title,
+    page.description,
+    page.h1,
+    page.canonical,
+    page.robots,
+    String(page.wordCount),
+    String(page.internalLinks),
+    String(page.externalLinks),
+    page.schemaTypes.join("; "),
+    page.headings.map((heading) => `H${heading.level}: ${heading.text}`).join(" | "),
+    page.rendered ? "javascript" : "html",
+    page.text,
+  ];
+}
 
 function displayPath(url: string, origin: string): string {
   return url.startsWith(`${origin}/`) ? url.slice(origin.length) : url;
@@ -39,8 +80,8 @@ type Summary = {
   commonHeadings: { text: string; level: number; pages: number }[];
 };
 
-function summarise(run: ExtractionRun): Summary {
-  const read = run.pages.filter((page): page is PageContents => page.ok);
+function summarise(pages: ExtractResult[]): Summary {
+  const read = pages.filter((page): page is PageContents => page.ok);
   const words = read.map((page) => page.wordCount);
 
   const schemaCounts = new Map<string, number>();
@@ -63,68 +104,27 @@ function summarise(run: ExtractionRun): Summary {
     }
   }
   const threshold = Math.max(2, Math.ceil(read.length / 2));
+  // Templates are found from a sample; comparing thousands of titles adds nothing.
+  const sample = read.length > 300 ? read.filter((_, index) => index % Math.ceil(read.length / 300) === 0) : read;
 
   return {
     read,
-    failed: run.pages.length - read.length,
+    failed: pages.length - read.length,
     rendered: read.filter((page) => page.rendered).length,
-    titleTemplate: textTemplate(read.map((page) => page.title)),
-    h1Template: textTemplate(read.map((page) => page.h1)),
-    descriptionTemplate: textTemplate(read.map((page) => page.description)),
+    titleTemplate: textTemplate(sample.map((page) => page.title)),
+    h1Template: textTemplate(sample.map((page) => page.h1)),
+    descriptionTemplate: textTemplate(sample.map((page) => page.description)),
     averageWords: words.length ? Math.round(words.reduce((sum, n) => sum + n, 0) / words.length) : 0,
-    minWords: words.length ? Math.min(...words) : 0,
-    maxWords: words.length ? Math.max(...words) : 0,
+    minWords: words.reduce((min, n) => Math.min(min, n), words.length ? Infinity : 0),
+    maxWords: words.reduce((max, n) => Math.max(max, n), 0),
     schemaTypes: [...schemaCounts.entries()]
-      .map(([type, pages]) => ({ type, pages }))
+      .map(([type, count]) => ({ type, pages: count }))
       .sort((a, b) => b.pages - a.pages || a.type.localeCompare(b.type)),
     commonHeadings: [...headingCounts.values()]
       .filter((heading) => heading.pages >= threshold)
       .sort((a, b) => b.pages - a.pages)
       .slice(0, MAX_COMMON_HEADINGS),
   };
-}
-
-function downloadContents(run: ExtractionRun, host: string) {
-  const header = [
-    "url",
-    "pattern",
-    "status",
-    "title",
-    "description",
-    "h1",
-    "canonical",
-    "robots",
-    "word_count",
-    "internal_links",
-    "external_links",
-    "schema_types",
-    "headings",
-    "read_from",
-    "text",
-  ];
-  const rows = run.pages.map((page) =>
-    page.ok
-      ? [
-          page.url,
-          run.pattern,
-          String(page.status),
-          page.title,
-          page.description,
-          page.h1,
-          page.canonical,
-          page.robots,
-          String(page.wordCount),
-          String(page.internalLinks),
-          String(page.externalLinks),
-          page.schemaTypes.join("; "),
-          page.headings.map((heading) => `H${heading.level}: ${heading.text}`).join(" | "),
-          page.rendered ? "javascript" : "html",
-          page.text,
-        ]
-      : [page.url, run.pattern, page.error, "", "", "", "", "", "", "", "", "", "", "", ""],
-  );
-  const slug = run.pattern.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "") || "home";
-  downloadCsv(`${host}-${slug}-contents.csv`, header, rows);
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -237,82 +237,72 @@ function PageDetails({ page, origin }: { page: ExtractResult; origin: string }) 
   );
 }
 
-export function ExtractionRunView({
-  run,
-  origin,
-  host,
-  onStop,
-}: {
-  run: ExtractionRun;
-  origin: string;
-  host: string;
-  onStop: () => void;
-}) {
-  const summary = summarise(run);
-  const done = run.pages.length;
-  const total = run.urls.length;
-
+/** Progress line, bar and Stop button for the current extraction. */
+export function ExtractionStatus({ job, onStop }: { job: ExtractionJob; onStop: () => void }) {
+  const running = job.state === "running";
+  const progress = job.rendering
+    ? job.rendering.done / Math.max(job.rendering.total, 1)
+    : job.done / Math.max(job.total, 1);
   return (
-    <div id={`contents-${run.id}`} className="scroll-mt-6 border-t border-rule pt-8 first:border-t-0 first:pt-0">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
-          <h3 className="truncate font-mono text-base text-ink" title={run.pattern}>
-            {run.pattern}
-          </h3>
-          <p className="mt-1 text-sm text-muted" role={run.state === "running" ? "status" : undefined}>
-            {run.state === "running" && run.rendering
-              ? `Running JavaScript on ${formatNumber(run.rendering.done)} of ${plural(run.rendering.total, "page")} that build their content in the browser.`
-              : run.state === "running"
-                ? `Read ${formatNumber(done)} of ${plural(total, "page")}.`
-                : `Read ${formatNumber(summary.read.length)} of ${plural(total, "page")}.`}
-            {run.state !== "running" && summary.failed > 0 && ` ${formatNumber(summary.failed)} couldn't be read.`}
-            {run.state !== "running" &&
-              summary.rendered > 0 &&
-              ` ${summary.rendered === 1 ? "1 was" : `${formatNumber(summary.rendered)} were`} read after running JavaScript.`}
-            {run.state === "stopped" && " Stopped early."}
-          </p>
-        </div>
-        <div className="flex gap-3">
-          {run.state === "running" ? (
-            <button type="button" onClick={onStop} className={secondaryButton}>
-              Stop extracting
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => downloadContents(run, host)}
-              disabled={done === 0}
-              className={secondaryButton}
-            >
-              <DownloadIcon />
-              Download contents CSV
-            </button>
-          )}
-        </div>
+    <div className="mt-4">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-sm text-muted" role="status">
+          {running && job.rendering
+            ? `Running JavaScript on ${formatNumber(job.rendering.done)} of ${plural(job.rendering.total, "page")} that build their content in the browser.`
+            : running
+              ? `Extracting contents of ${formatNumber(job.done)} of ${plural(job.total, "page")}.`
+              : job.state === "stopped"
+                ? `Stopped after ${plural(job.done, "page")}. Extract contents again to continue where it stopped.`
+                : job.state === "failed"
+                  ? `Stopped after ${plural(job.done, "page")}.`
+                  : `Extracted contents of ${plural(job.done, "page")}. Download CSV now includes them.`}
+          {job.skipped > 0 &&
+            ` ${formatNumber(job.skipped)} more matching ${job.skipped === 1 ? "page was" : "pages were"} left out, because one run covers ${formatNumber(job.total)} pages. Run it again to continue.`}
+        </p>
+        {running && (
+          <button type="button" onClick={onStop} className={secondaryButton.replace("flex-1 ", "")}>
+            Stop extracting
+          </button>
+        )}
       </div>
-
-      {run.state === "running" && (
-        <div className="mt-4 h-[3px] w-full overflow-hidden rounded-full bg-contour-soft">
-          <div
-            className="h-full rounded-full bg-contour"
-            style={{
-              width: `${
-                run.rendering
-                  ? (run.rendering.done / Math.max(run.rendering.total, 1)) * 100
-                  : total
-                    ? (done / total) * 100
-                    : 0
-              }%`,
-            }}
-          />
+      {running && (
+        <div className="mt-3 h-[3px] w-full overflow-hidden rounded-full bg-contour-soft">
+          <div className="h-full rounded-full bg-contour" style={{ width: `${progress * 100}%` }} />
         </div>
       )}
-
-      {run.error && (
-        <p role="alert" className="mt-4 max-w-[52ch] border-l-2 border-alert pl-4 text-ink">
-          {run.error}
+      {job.error && (
+        <p role="alert" className="mt-3 max-w-[52ch] border-l-2 border-alert pl-4 text-ink">
+          {job.error}
         </p>
       )}
+    </div>
+  );
+}
+
+function PatternContents({
+  pattern,
+  pages,
+  groupSize,
+  origin,
+}: {
+  pattern: string;
+  pages: ExtractResult[];
+  groupSize: number;
+  origin: string;
+}) {
+  const summary = summarise(pages);
+  const listed = pages.slice(0, MAX_LISTED_PAGES);
+  return (
+    <div className="border-t border-rule pt-8 first:border-t-0 first:pt-0">
+      <h3 className="truncate font-mono text-base text-ink" title={pattern}>
+        {pattern}
+      </h3>
+      <p className="mt-1 text-sm text-muted">
+        Read {formatNumber(summary.read.length)} of {plural(groupSize, "page")}.
+        {summary.failed > 0 && ` ${formatNumber(summary.failed)} couldn't be read.`}
+        {summary.rendered > 0 &&
+          ` ${summary.rendered === 1 ? "1 was" : `${formatNumber(summary.rendered)} were`} read after running JavaScript.`}
+      </p>
 
       {summary.read.length > 0 && (
         <dl className="mt-5 divide-y divide-rule border-y border-rule">
@@ -358,15 +348,67 @@ export function ExtractionRunView({
         </dl>
       )}
 
-      {done > 0 && (
-        <ul className="mt-5 divide-y divide-rule rounded-md border border-rule">
-          {run.pages.map((page) => (
+      <details className="mt-5">
+        <summary className="cursor-pointer text-sm text-muted hover:text-contour">
+          Pages ({formatNumber(pages.length)})
+        </summary>
+        <ul className="mt-3 divide-y divide-rule rounded-md border border-rule">
+          {listed.map((page) => (
             <li key={page.url}>
               <PageDetails page={page} origin={origin} />
             </li>
           ))}
         </ul>
-      )}
+        {pages.length > listed.length && (
+          <p className="mt-3 text-sm text-muted">
+            Showing {formatNumber(listed.length)} of {formatNumber(pages.length)}. Download the CSV for every page.
+          </p>
+        )}
+      </details>
     </div>
+  );
+}
+
+/** Extracted contents, summarised per URL pattern. */
+export function ContentsSection({
+  groups,
+  contents,
+  origin,
+}: {
+  groups: Group[];
+  contents: ContentsMap;
+  origin: string;
+}) {
+  const sections = groups
+    .map((group) => ({
+      group,
+      pages: group.urls
+        .map((url) => contents.get(toAbsolute(url, origin)))
+        .filter((page): page is ExtractResult => page !== undefined),
+    }))
+    .filter((section) => section.pages.length > 0);
+  if (sections.length === 0) return null;
+
+  return (
+    <section aria-labelledby="contents-heading" className="mt-14 border-t border-rule pt-10">
+      <h2 id="contents-heading" className="font-display text-3xl font-bold tracking-tight text-ink">
+        Page contents
+      </h2>
+      <p className="mt-2 max-w-[52ch] text-sm leading-relaxed text-muted">
+        Templates show the wording the pages in each pattern share, with {"{…}"} where it changes. Open a page to
+        see its headings and text.
+      </p>
+      <div className="mt-8 space-y-10">
+        {sections.map(({ group, pages }) => (
+          <PatternContents
+            key={group.pattern}
+            pattern={group.pattern}
+            pages={pages}
+            groupSize={group.count}
+            origin={origin}
+          />
+        ))}
+      </div>
+    </section>
   );
 }

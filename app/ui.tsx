@@ -1,5 +1,7 @@
 "use client";
 
+export type Group = { pattern: string; count: number; urls: string[] };
+
 export function formatNumber(value: number): string {
   return value.toLocaleString("en-US");
 }
@@ -71,6 +73,13 @@ export const CopyIcon = () => (
 export const CheckIcon = () => (
   <Icon>
     <path d="M5 12.5l4.5 4.5L19 7.5" />
+  </Icon>
+);
+
+export const ExtractIcon = () => (
+  <Icon>
+    <path d="M6 3.5h8l4 4v13H6z" />
+    <path d="M9.5 12h5M9.5 15.5h5" />
   </Icon>
 );
 
