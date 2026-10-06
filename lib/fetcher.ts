@@ -114,6 +114,14 @@ export function parseRetryAfter(value: string | null | undefined): number | null
   return Number.isNaN(date) ? null : Math.max(0, (date - Date.now()) / 1000);
 }
 
+/** Headers as a plain object; every Set-Cookie is kept, one per line. */
+function headerRecord(headers: Headers): Record<string, string> {
+  const record = Object.fromEntries(headers);
+  const cookies = typeof headers.getSetCookie === "function" ? headers.getSetCookie() : [];
+  if (cookies.length) record["set-cookie"] = cookies.join("\n");
+  return record;
+}
+
 function charsetOf(contentType: string): string {
   const match = /charset\s*=\s*["']?([\w.:-]+)/i.exec(contentType);
   return match ? match[1].toLowerCase() : "utf-8";
@@ -257,7 +265,7 @@ export async function fetchPage(url: string, options: FetchOptions = {}): Promis
       if (options.allowHost && !options.allowHost(new URL(next).hostname)) {
         // Record where it wanted to go, but don't leave the site.
         result.status = response.status;
-        result.headers = Object.fromEntries(response.headers);
+        result.headers = headerRecord(response.headers);
         result.offHostRedirect = next;
         result.ms = Date.now() - started;
         return result;
@@ -268,7 +276,7 @@ export async function fetchPage(url: string, options: FetchOptions = {}): Promis
     }
 
     result.status = response.status;
-    result.headers = Object.fromEntries(response.headers);
+    result.headers = headerRecord(response.headers);
     result.retryAfter = parseRetryAfter(response.headers.get("retry-after"));
     try {
       const read = await readCapped(response, maxBytes);

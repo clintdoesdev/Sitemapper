@@ -6,6 +6,12 @@ import { fetchPage, fetcherConfig } from "../lib/fetcher";
 import { parseRobots, aiBotAccess } from "../lib/robots";
 import { groupByPattern, groupUrls, matchPattern, classifySegment, textTemplate } from "../lib/patterns";
 import { mapSite, parseSitemap, sitemapStat } from "../lib/crawl";
+import { analyseHtml, analyseUrls } from "../lib/extract";
+import { checkSite } from "../lib/site";
+import { Budget } from "../lib/fetcher";
+import { wordpressPrediction, nextAppRouterPage, clientRenderedShell, cloudflareChallenge } from "./fixtures";
+import { POST as analyseRoute } from "../app/api/analyse/route";
+import { POST as siteRoute } from "../app/api/site/route";
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -24,6 +30,9 @@ const dns: Record<string, string[]> = {
   "sneaky.example": ["93.184.215.20", "10.1.2.3"],
   "mapped.example": ["::ffff:192.168.1.10"],
   "v6local.example": ["fd00::1"],
+  "tips.example": ["93.184.215.30"],
+  "www.tips.example": ["93.184.215.30"],
+  "bookie.example": ["93.184.215.40"],
 };
 guardConfig.lookup = async (host) => {
   const addresses = dns[host];
@@ -320,6 +329,160 @@ test("robots: AI crawler access", () => {
   assert.equal(access.GPTBot, "blocked");
   assert.equal(access.CCBot, "partly blocked");
   assert.equal(access.ClaudeBot, "allowed");
+});
+
+// ---------------------------------------------------------------------------
+// Page analysis
+// ---------------------------------------------------------------------------
+
+const PATTERNS = ["/", "/predictions/*", "/league/*/table", "/about", "/predictions"];
+
+test("schema: @graph parses, invalid JSON is reported, FAQ mismatches are flagged", () => {
+  const data = analyseHtml(wordpressPrediction("Arsenal", "Chelsea", 12), { url: "https://tips.example/predictions/arsenal-vs-chelsea/", patterns: PATTERNS });
+  assert.deepEqual(data.schema.types, ["WebSite", "SportsEvent", "BreadcrumbList", "FAQPage"]);
+  assert.equal(data.schema.blocks.length, 2);
+  assert.equal(data.schema.blocks[0].valid, true);
+  assert.equal(data.schema.blocks[1].valid, false);
+  assert.match(data.schema.blocks[1].error ?? "", /JSON|property/i);
+  const event = data.schema.entities.find((entity) => entity.type === "SportsEvent")!;
+  assert.equal(event.details.homeTeam, "Arsenal");
+  assert.deepEqual(data.schema.faq.notVisible, ["Is there a hidden question?"]);
+  assert.deepEqual(data.structure.breadcrumb, ["Home", "Predictions", "Arsenal vs Chelsea"]);
+});
+
+test("page analysis: head, structure, links, signals and sports niche", () => {
+  const data = analyseHtml(wordpressPrediction("Arsenal", "Chelsea", 12), {
+    url: "https://tips.example/predictions/arsenal-vs-chelsea/",
+    headers: { server: "cloudflare", "x-powered-by": "PHP/8.2" },
+    patterns: PATTERNS,
+  });
+  assert.equal(data.head.canonical.kind, "self");
+  assert.equal(data.structure.h1Count, 1);
+  assert.equal(data.structure.main.source, "main");
+  assert.ok(data.structure.blocks.some((block) => block.signature === "main#content.site-main"));
+  assert.equal(data.structure.images.missingAlt, 1);
+  assert.deepEqual(data.links.affiliate.redirectPaths.map((r) => r.url), ["https://tips.example/go/bet9ja/", "https://tips.example/go/sportybet/"]);
+  assert.ok(data.links.unmatchedInternal.includes("https://tips.example/secret-page/"));
+  assert.equal(data.links.internalByPattern.find((t) => t.pattern === "/league/*/table")?.count, 2);
+  assert.ok(data.links.messaging.some((m) => m.kind === "Telegram"));
+  assert.equal(data.signals.trust.responsibleGambling, true);
+  assert.deepEqual(data.signals.trust.helpOrganisations, ["BeGambleAware"]);
+  assert.equal(data.niche.niche, "sports predictions/betting");
+  assert.deepEqual(data.niche.sports?.fixtures, ["Arsenal vs Chelsea"]);
+  assert.deepEqual(data.niche.sports?.bookmakers, ["Bet9ja", "bet365"]);
+  assert.deepEqual(data.niche.sports?.bookingCodes, ["B9X7K2Q"]);
+  assert.ok(data.perf.mixedContent.length === 1);
+  assert.ok(data.perf.validators.pageSpeed.startsWith("https://pagespeed.web.dev/analysis?url=https%3A%2F%2F"));
+});
+
+test("stack: WordPress and Next.js are detected, client rendering is spotted", () => {
+  const wp = analyseHtml(wordpressPrediction("Lyon", "PSG", 13), { url: "https://tips.example/predictions/lyon-vs-psg/", headers: { server: "cloudflare" } });
+  assert.deepEqual(wp.tech.cms.map((c) => c.name), ["WordPress", "Yoast SEO"]);
+  assert.deepEqual(wp.tech.hosting.map((h) => h.name), ["Cloudflare"]);
+  assert.ok(wp.tech.thirdParties.some((t) => t.category === "sports data"));
+  assert.deepEqual(wp.tech.tagIds.ga4, ["G-ABC1234567"]);
+  const next = analyseHtml(nextAppRouterPage(), { url: "https://acme.example/pricing", headers: { "x-vercel-id": "1" } });
+  assert.deepEqual(next.tech.frameworks.map((f) => f.name), ["Next.js (app router)"]);
+  assert.deepEqual(next.tech.hosting.map((h) => h.name), ["Vercel"]);
+  assert.equal(next.tech.rendering, "server-rendered");
+  const spa = analyseHtml(clientRenderedShell(), { url: "https://spa.example/" });
+  assert.equal(spa.tech.rendering, "mostly client-rendered");
+});
+
+function tipsSite(): Record<string, Route> {
+  const html = (body: string) => ({ body, headers: { "content-type": "text/html; charset=utf-8" } });
+  return {
+    "https://tips.example/robots.txt": {
+      body: "User-agent: *\nDisallow: /private/\nCrawl-delay: 2\n\nUser-agent: GPTBot\nDisallow: /\n\nSitemap: https://tips.example/sitemap.xml",
+      headers: { "content-type": "text/plain" },
+    },
+    "https://tips.example/": { ...html(wordpressPrediction("Home", "Page", 1)), headers: { "content-type": "text/html", server: "cloudflare", "cf-cache-status": "HIT", "strict-transport-security": "max-age=1" } },
+    "https://tips.example/ads.txt": { body: "google.com, pub-1, DIRECT, f08c47fec0942fa0\nappnexus.com, 2, RESELLER\n# c\nOWNERDOMAIN=tips.example", headers: { "content-type": "text/plain" } },
+    "https://tips.example/app-ads.txt": html("<!doctype html><title>Not found</title>"),
+    "https://tips.example/llms.txt": { body: "# Tips\n> Football predictions", headers: { "content-type": "text/plain" } },
+    "http://tips.example/": { status: 301, headers: { location: "https://tips.example/" } },
+    "https://www.tips.example/": { status: 301, headers: { location: "https://tips.example/" } },
+    "https://tips.example/predictions/arsenal-vs-chelsea/": html(wordpressPrediction("Arsenal", "Chelsea", 12)),
+    "https://tips.example/predictions/arsenal-vs-chelsea": { status: 301, headers: { location: "/predictions/arsenal-vs-chelsea/" } },
+    "https://tips.example/predictions/lyon-vs-psg/": html(wordpressPrediction("Lyon", "PSG", 13)),
+    "https://tips.example/predictions/blocked/": { status: 403, body: cloudflareChallenge, headers: { "content-type": "text/html", "cf-mitigated": "challenge" } },
+    "https://tips.example/predictions/moved/": { status: 302, headers: { location: "https://bookie.example/landing" } },
+  };
+}
+
+test("site checks: robots, root files and host behaviour, never leaving the site", async () => {
+  resetNetwork(tipsSite());
+  const report = await checkSite({ origin: "https://tips.example", patterns: PATTERNS, sampleUrl: "https://tips.example/predictions/arsenal-vs-chelsea/" });
+  assert.equal(report.robots.present, true);
+  assert.equal(report.robots.aiBots.find((b) => b.bot === "GPTBot")?.access, "blocked");
+  assert.equal(report.robots.groups[0].crawlDelay, 2);
+  assert.equal(report.files.adsTxt.present, true);
+  assert.equal(report.files.adsTxt.direct, 1);
+  assert.equal(report.files.adsTxt.reseller, 1);
+  assert.equal(report.files.adsTxt.ownerDomain, "tips.example");
+  assert.equal(report.files.appAdsTxt.present, false, "HTML soft 404 counts as missing");
+  assert.equal(report.files.llmsTxt.firstLines[0], "# Tips");
+  assert.equal(report.host.https.redirectsToHttps, true);
+  assert.equal(report.host.canonicalHost.winner, "bare domain");
+  assert.match(report.host.trailingSlash?.note ?? "", /without a slash redirects to the trailing-slash form/);
+  assert.equal(report.host.notFound.kind, "real 404");
+  assert.equal(report.homepage.outcome, "ok");
+  assert.equal(report.headers.cfCacheStatus, "HIT");
+  assert.equal(report.headers.strictTransportSecurity, true);
+  assert.equal(requested[0], "https://tips.example/robots.txt", "robots.txt is read first");
+  const hosts = new Set(requested.map((url) => new URL(url).hostname));
+  assert.deepEqual([...hosts].sort(), ["tips.example", "www.tips.example"]);
+});
+
+test("analysis: blocked pages, robots skips and off-site redirects; only the mapped host is requested", async () => {
+  resetNetwork(tipsSite());
+  const { parseRobots } = await import("../lib/robots");
+  const robots = parseRobots("User-agent: *\nDisallow: /private/", "https://tips.example");
+  const pages = await analyseUrls(
+    [
+      "https://tips.example/predictions/arsenal-vs-chelsea/",
+      "https://tips.example/predictions/blocked/",
+      "https://tips.example/private/x",
+      "https://tips.example/predictions/moved/",
+    ],
+    { pattern: "/predictions/*", patterns: PATTERNS, robots, siteHost: "tips.example", budget: new Budget() },
+  );
+  assert.deepEqual(pages.map((page) => page.outcome), ["ok", "blocked", "robots", "off-host"]);
+  assert.equal(pages[1].message, "Blocked by bot protection. Open view-source:https://tips.example/predictions/blocked/ in a browser to study it manually.");
+  assert.equal(pages[3].offHostRedirect, "https://bookie.example/landing");
+  assert.ok(requested.every((url) => new URL(url).hostname === "tips.example"), requested.join(", "));
+  assert.ok(!requested.some((url) => url.includes("/go/")), "affiliate redirects are never requested");
+  assert.ok(!requested.some((url) => url.includes("/private/")), "robots-disallowed URLs are never requested");
+});
+
+test("routes: URLs off the mapped host get a 400; foreign Origin headers get a 403", async () => {
+  resetNetwork(tipsSite());
+  const post = (body: unknown, headers: Record<string, string> = {}) =>
+    new Request("http://localhost:3000/api/analyse", {
+      method: "POST",
+      headers: { "content-type": "application/json", host: "localhost:3000", ...headers },
+      body: JSON.stringify(body),
+    });
+  const offHost = await analyseRoute(post({ origin: "https://tips.example", pattern: "/x/*", urls: ["https://bookie.example/x/1"] }));
+  assert.equal(offHost.status, 400);
+  const tooMany = await analyseRoute(post({ origin: "https://tips.example", pattern: "/x/*", urls: ["https://tips.example/1", "https://tips.example/2", "https://tips.example/3", "https://tips.example/4"] }));
+  assert.equal(tooMany.status, 400);
+  const privateOrigin = await analyseRoute(post({ origin: "https://evil.example", pattern: "/", urls: ["https://evil.example/"] }));
+  assert.equal(privateOrigin.status, 400);
+  const foreign = await analyseRoute(post({ origin: "https://tips.example", pattern: "/", urls: ["https://tips.example/"] }, { origin: "https://attacker.example" }));
+  assert.equal(foreign.status, 403);
+  const site = await siteRoute(
+    new Request("http://localhost:3000/api/site", {
+      method: "POST",
+      headers: { "content-type": "application/json", host: "localhost:3000" },
+      body: JSON.stringify({ origin: "https://tips.example", sampleUrl: "https://bookie.example/" }),
+    }),
+  );
+  assert.equal(site.status, 400);
+  const ok = await analyseRoute(post({ origin: "https://tips.example", pattern: "/predictions/*", urls: ["https://tips.example/predictions/lyon-vs-psg/"], patterns: PATTERNS }, { origin: "http://localhost:3000" }));
+  assert.equal(ok.status, 200);
+  const json = (await ok.json()) as { pages: { outcome: string }[] };
+  assert.equal(json.pages[0].outcome, "ok");
 });
 
 // ---------------------------------------------------------------------------

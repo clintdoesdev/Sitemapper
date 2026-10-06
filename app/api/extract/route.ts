@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkOrigin } from "@/lib/request";
 import type { Identity } from "@/lib/crawl";
-import { extractPages, MAX_EXTRACT_URLS, MAX_RENDER_URLS } from "@/lib/extract";
+import { extractPages, MAX_EXTRACT_URLS, MAX_RENDER_URLS } from "@/lib/contents";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;

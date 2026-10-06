@@ -1,6 +1,6 @@
 "use client";
 
-import type { ExtractResult, PageContents } from "@/lib/extract";
+import type { ExtractResult, PageContents } from "@/lib/contents";
 import { textTemplate } from "@/lib/patterns";
 import { formatNumber, plural, secondaryButton, toAbsolute, type Group } from "./ui";
 

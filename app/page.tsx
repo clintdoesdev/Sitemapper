@@ -23,7 +23,7 @@ import {
   type ContentsMap,
   type ExtractionJob,
 } from "./contents";
-import type { ExtractResult } from "@/lib/extract";
+import type { ExtractResult } from "@/lib/contents";
 
 type MapResult = {
   origin: string;
