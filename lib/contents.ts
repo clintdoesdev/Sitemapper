@@ -6,10 +6,10 @@ import { isAffiliatePath } from "./affiliate";
 import { renderPage, withBrowser } from "./render";
 
 export const MAX_EXTRACT_URLS = 20;
-export const MAX_RENDER_URLS = 4;
+export const MAX_RENDER_URLS = 6;
 /** Pages fetched at once per request; a worker pool, so one slow page doesn't hold up the rest. */
 const EXTRACT_CONCURRENCY = 6;
-const RENDER_CONCURRENCY = 2;
+const RENDER_CONCURRENCY = 3;
 const GENTLE_PAUSE_MS = 700;
 const EXTRACT_BUDGET_MS = 45_000;
 // Spreadsheet cells hold at most 32,767 characters.
@@ -220,7 +220,18 @@ async function loadRobotsText(origin: string, budget: Budget): Promise<string> {
   return text.slice(0, MAX_ROBOTS_TEXT);
 }
 
+/**
+ * Reads one page as SitemapperBot. When the site refuses that (401/403 or a
+ * bot-protection page), asks once more as a regular browser would.
+ */
 async function extractOne(url: string, budget: Budget): Promise<ExtractResult> {
+  const first = await extractOnce(url, budget);
+  if (first.ok || !first.blocked || budget.identity === "browser" || budget.remaining() < 2_000) return first;
+  const second = await extractOnce(url, new Budget(budget.remaining(), "browser"));
+  return second.ok || !second.blocked ? second : first;
+}
+
+async function extractOnce(url: string, budget: Budget): Promise<ExtractResult> {
   const response = await fetchText(url, budget, { html: true });
   if (!response.ok) {
     if (response.reason === "blocked") return { url, ok: false, error: "Redirected to a private address." };

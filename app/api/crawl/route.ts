@@ -61,7 +61,29 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await mapSite(origin, identity);
+    const started = Date.now();
+    let result: Awaited<ReturnType<typeof mapSite>> | null = null;
+    let firstError: unknown = null;
+    try {
+      result = await mapSite(origin, identity);
+    } catch (err) {
+      if (!(err instanceof CrawlError)) throw err;
+      firstError = err;
+    }
+    // Sites that refuse tools often answer a regular browser: when the first
+    // try found next to nothing, map again as one, if there's time left.
+    const left = 55_000 - (Date.now() - started);
+    if (identity === "bot" && (result === null || result.urls.length <= 1) && left > 15_000) {
+      try {
+        const again = await mapSite(origin, "browser", left - 5_000);
+        if (result === null || again.urls.length > result.urls.length) {
+          result = { ...again, notes: [...again.notes, "The site refused SitemapperBot, so pages were found by asking as a regular browser."] };
+        }
+      } catch (err) {
+        if (!(err instanceof CrawlError)) throw err;
+      }
+    }
+    if (!result) throw firstError;
     const siteOrigin = commonOrigin(result.urls, result.origin);
     // URLs on the main origin are sent as paths to keep the response small.
     const groups = groupByPattern(result.urls, result.lastmod).map((group) => ({

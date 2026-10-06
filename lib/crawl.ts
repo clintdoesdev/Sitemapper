@@ -507,8 +507,8 @@ async function crawlSite(origin: string, robots: Robots, budget: Budget) {
 // Entry point
 // ---------------------------------------------------------------------------
 
-export async function mapSite(origin: string, identity: Identity = "bot"): Promise<CrawlResult> {
-  const budget = new Budget(undefined, identity);
+export async function mapSite(origin: string, identity: Identity = "bot", budgetMs?: number): Promise<CrawlResult> {
+  const budget = new Budget(budgetMs, identity);
   const host = new URL(origin).hostname;
   const notes: string[] = [];
 

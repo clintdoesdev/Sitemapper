@@ -1,5 +1,5 @@
 /**
- * Read every page as a background job: the server reads the pages in slices
+ * Get page contents as a background job: the server reads the pages in slices
  * of under a minute, each slice starting the next, and keeps progress and
  * results in the store. The browser can close and check back with the job
  * link; nothing depends on it staying open.
@@ -25,10 +25,10 @@ export const STALE_MS = 90_000;
 const ACTIVE_WINDOW_MS = 10 * 60 * 1000;
 /** Time a step needs; with less left, the slice hands over to the next one. */
 const MIN_STEP_MS = 12_000;
-const HTML_BATCH = 60;
-const HTML_CONCURRENCY = 18;
-const RETRY_CHUNK = 5;
-const RENDER_CHUNK = 4;
+const HTML_BATCH = 80;
+const HTML_CONCURRENCY = 20;
+const RETRY_CHUNK = 20;
+const RENDER_CHUNK = 6;
 const MAX_PAUSE_MS = 60_000;
 const MAX_ROBOTS_CHARS = 100_000;
 const ITEM_BATCH = 500;
@@ -61,7 +61,7 @@ export const jobsConfig: {
   kick: (meta: JobMeta) => Promise<void>;
 } = {
   sliceMs: 50_000,
-  retryDelaysMs: [5_000, 15_000, 30_000],
+  retryDelaysMs: [3_000, 10_000],
   kick: kickOverHttp,
 };
 
@@ -383,6 +383,7 @@ export async function runSlice(id: string): Promise<void> {
     const deadline = Date.now() + jobsConfig.sliceMs;
     const left = () => deadline - Date.now();
 
+    let rateLimited = false;
     const write = async (pages: ExtractResult[], indices: number[]) => {
       const fields: Record<string, string> = {};
       for (const page of pages) fields[page.url] = encodeResult(page);
@@ -395,17 +396,18 @@ export async function runSlice(id: string): Promise<void> {
       current.marks = marks.join("");
       const limited = pages.filter((page) => !page.ok && page.rateLimited);
       if (limited.length > 0) {
+        rateLimited = true;
         const asked = Math.max(0, ...limited.map((page) => (!page.ok && page.retryAfter) || 0)) * 1000;
         current.pauseUntil = Math.max(current.pauseUntil, Date.now() + Math.min(asked > 0 ? asked : 10_000, MAX_PAUSE_MS));
       }
     };
-    const read = (indices: number[], options: { gentle?: boolean; render?: boolean; concurrency?: number }) => {
+    const read = (indices: number[], options: { gentle?: boolean; render?: boolean; concurrency?: number; identity?: Identity }) => {
       const robotsOut: Record<string, string> = {};
       return extractPages(
         indices.map((index) => items[index]),
         {
-          ...options,
           identity: job.identity,
+          ...options,
           robotsTxt: current.robotsTxt,
           robotsOut,
           budgetMs: Math.max(5_000, Math.min(40_000, left() - 5_000)),
@@ -426,9 +428,8 @@ export async function runSlice(id: string): Promise<void> {
       startRender();
     };
     const startRender = () => {
-      // Pages built by JavaScript get a second read in a browser, and so do
-      // refused pages when requests are sent as a regular browser.
-      const queue = indicesWith(current.marks, job.identity === "browser" ? "sb" : "s");
+      // Pages built by JavaScript, and pages the site refused, get a second read in a real browser.
+      const queue = indicesWith(current.marks, "sb");
       if (queue.length > 0) {
         current.phase = "render";
         current.render = { queue, total: queue.length, done: 0 };
@@ -471,7 +472,8 @@ export async function runSlice(id: string): Promise<void> {
         if (current.cursor >= job.total) startRetry(0);
       } else if (current.phase === "retry" && current.retry) {
         const indices = current.retry.queue.slice(0, RETRY_CHUNK);
-        await write(await read(indices, { gentle: true }), indices);
+        // Full speed unless the site has asked for fewer requests.
+        await write(await read(indices, rateLimited ? { gentle: true } : { concurrency: HTML_CONCURRENCY }), indices);
         current.retry.queue = current.retry.queue.slice(indices.length);
         current.retry.done += indices.length;
         if (current.retry.queue.length === 0) startRetry(current.retry.round + 1);
@@ -480,7 +482,7 @@ export async function runSlice(id: string): Promise<void> {
         const urls = indices.map((index) => items[index]);
         let rendered: ExtractResult[];
         try {
-          rendered = await read(indices, { render: true });
+          rendered = await read(indices, { render: true, identity: "browser" });
         } catch (error) {
           const message = `Running the page's JavaScript failed${error instanceof Error && error.message ? ` (${error.message})` : ""}.`;
           rendered = urls.map((url) => ({ url, ok: false as const, error: message }));
