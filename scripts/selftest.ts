@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import { checkHost, clearGuardCache, guardConfig, isPrivateAddress, blockedHostReason } from "../lib/guard";
 import { fetchPage, fetcherConfig } from "../lib/fetcher";
 import { parseRobots, aiBotAccess } from "../lib/robots";
-import { groupByPattern, textTemplate } from "../lib/patterns";
+import { groupByPattern, groupUrls, matchPattern, classifySegment, textTemplate } from "../lib/patterns";
+import { mapSite, parseSitemap, sitemapStat } from "../lib/crawl";
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -105,6 +106,63 @@ test("text templates (extract contents feature) still work", () => {
   );
 });
 
+test("matchPattern picks the most specific pattern", () => {
+  const patterns = ["/", "/*", "/league/*/*", "/league/*/table", "/predictions/*", "/about"];
+  assert.equal(matchPattern("https://example.com/league/epl/table", patterns), "/league/*/table");
+  assert.equal(matchPattern("https://example.com/league/epl/fixtures", patterns), "/league/*/*");
+  assert.equal(matchPattern("/about", patterns), "/about", "a literal beats /*");
+  assert.equal(matchPattern("/contact", patterns), "/*");
+  assert.equal(matchPattern("https://example.com/", patterns), "/", "/ only matches the root");
+  assert.equal(matchPattern("https://example.com/a/b/c/d", patterns), null);
+  assert.equal(matchPattern("https://example.com/predictions/x?ref=1", patterns), "/predictions/*");
+});
+
+test("groups carry share, freshness and placeholder kinds", () => {
+  const urls = [
+    `${base}/predictions/arsenal-vs-chelsea-12-10-2026`,
+    `${base}/predictions/lyon-vs-psg-13-10-2026`,
+    `${base}/predictions/inter-vs-milan-14-10-2026`,
+    `${base}/news/2026/hello`,
+    `${base}/news/2025/world`,
+  ];
+  const lastmod = new Map([[urls[0], "2026-10-12T00:00:00.000Z"], [urls[1], "2026-10-13T00:00:00.000Z"]]);
+  const groups = groupUrls(urls, lastmod);
+  const predictions = groups.find((group) => group.pattern === "/predictions/*")!;
+  assert.equal(predictions.share, 60);
+  assert.equal(predictions.lastmodNewest, "2026-10-13T00:00:00.000Z");
+  assert.equal(predictions.lastmodCoverage, 67);
+  assert.equal(predictions.placeholders[0].kind, "slug with date");
+  assert.equal(predictions.placeholders[0].examples.length, 3);
+  const news = groups.find((group) => group.pattern === "/news/*/*")!;
+  assert.deepEqual(news.placeholders.map((p) => p.kind), ["year", "slug"]);
+  assert.equal(classifySegment("2026-10-12", null), "date");
+  assert.equal(classifySegment("3", "page"), "page number");
+  assert.equal(classifySegment("12345678", null), "id");
+  assert.equal(classifySegment("a1b2c3d4", null), "id");
+  assert.equal(classifySegment("premier-league", null), "slug");
+});
+
+test("sitemaps: lastmod, extensions and auto-generated lastmod", () => {
+  const entries = Array.from({ length: 20 }, (_, i) =>
+    `<url><loc>https://example.com/p/${i}</loc><lastmod>${i === 0 ? "2026-01-01" : "2026-10-06T10:00:00+00:00"}</lastmod><image:image><image:loc>https://example.com/i.png</image:loc></image:image></url>`,
+  ).join("");
+  const parsed = parseSitemap(`<?xml version="1.0"?><urlset xmlns:image="x">${entries}</urlset>`)!;
+  assert.equal(parsed.kind, "urlset");
+  assert.equal(parsed.entries.length, 20);
+  assert.equal(parsed.entries[1].lastmod, "2026-10-06T10:00:00.000Z");
+  const stat = sitemapStat("https://example.com/sitemap.xml", parsed);
+  assert.equal(stat.withLastmod, 20);
+  assert.equal(stat.distinctLastmod, 2);
+  assert.equal(stat.oldestLastmod, "2026-01-01T00:00:00.000Z");
+  assert.equal(stat.extensions.image, true);
+  assert.equal(stat.extensions.hreflang, false);
+  assert.equal(stat.autoLastmod, true, "19 of 20 share one value");
+  const index = parseSitemap("<sitemapindex><sitemap><loc><![CDATA[https://example.com/a.xml?x=1&amp;y=2]]></loc></sitemap></sitemapindex>")!;
+  assert.equal(index.kind, "index");
+  assert.equal(index.entries[0].loc, "https://example.com/a.xml?x=1&y=2");
+  assert.equal(parseSitemap("<html></html>"), null);
+});
+
 // ---------------------------------------------------------------------------
 // SSRF guard and redirect-safe fetching
 // ---------------------------------------------------------------------------
@@ -186,18 +244,43 @@ test("fetcher: bodies stop at the size cap, charsets decode, bot protection is d
   const big = await fetchPage("https://example.com/big", { maxBytes: 1000 });
   assert.equal(big.truncated, true);
   assert.equal(big.body.length, 1000);
-  routes["https://example.com/latin"] = { body: "", headers: { "content-type": "text/html; charset=iso-8859-1" } };
-  fetcherConfig.fetch = (async (input: RequestInfo | URL) => {
-    const url = String(input);
-    if (url.endsWith("/latin")) {
+  const shared = fetcherConfig.fetch;
+  fetcherConfig.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).endsWith("/latin")) {
       return new Response(new Uint8Array([0x63, 0x61, 0x66, 0xe9]), { headers: { "content-type": "text/html; charset=iso-8859-1" } });
     }
-    const route = routes[url];
-    return new Response(route?.body ?? "", { status: route?.status ?? 404, headers: { "content-type": "text/html", ...(route?.headers ?? {}) } });
+    return shared(input, init);
   }) as typeof fetch;
-  assert.equal((await fetchPage("https://example.com/latin")).body, "café");
+  try {
+    assert.equal((await fetchPage("https://example.com/latin")).body, "café");
+  } finally {
+    fetcherConfig.fetch = shared;
+  }
   const cf = await fetchPage("https://example.com/cf");
   assert.equal(cf.blocked, true);
+});
+
+test("map: robots.txt sitemaps, index, lastmod and private sitemap URLs", async () => {
+  resetNetwork({
+    "https://example.com/robots.txt": {
+      body: "User-agent: *\nDisallow: /private\nSitemap: https://example.com/sitemap_index.xml\nSitemap: https://evil.example/s.xml",
+      headers: { "content-type": "text/plain" },
+    },
+    "https://example.com/sitemap_index.xml": {
+      body: "<sitemapindex><sitemap><loc>https://example.com/a.xml</loc></sitemap><sitemap><loc>http://10.0.0.5/b.xml</loc></sitemap></sitemapindex>",
+      headers: { "content-type": "application/xml" },
+    },
+    "https://example.com/a.xml": {
+      body: "<urlset><url><loc>https://example.com/predictions/a-vs-b</loc><lastmod>2026-10-01</lastmod></url><url><loc>https://example.com/predictions/c-vs-d</loc></url></urlset>",
+      headers: { "content-type": "application/xml" },
+    },
+  });
+  const result = await mapSite("https://example.com");
+  assert.equal(result.source, "sitemap", `requested: ${requested.join(", ")}; notes: ${result.notes.join(" ")}`);
+  assert.deepEqual(result.urls, ["https://example.com/predictions/a-vs-b", "https://example.com/predictions/c-vs-d"]);
+  assert.equal(result.lastmod.get("https://example.com/predictions/a-vs-b"), "2026-10-01T00:00:00.000Z");
+  assert.equal(result.sitemapStats.length, 2);
+  assert.ok(!requested.some((url) => url.includes("evil.example") || url.includes("10.0.0.5")), "private sitemap URLs are never fetched");
 });
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,31 @@
+export type PlaceholderKind =
+  | "date"
+  | "year"
+  | "number"
+  | "id"
+  | "page number"
+  | "slug"
+  | "slug with date"
+  | "mixed";
+
+export type Placeholder = {
+  /** Segment index in the path (0 = first segment). */
+  position: number;
+  kind: PlaceholderKind;
+  examples: string[];
+};
+
 export type PatternGroup = {
   pattern: string;
   count: number;
   urls: string[];
+  /** Percent of all URLs, one decimal. */
+  share: number;
+  lastmodNewest: string | null;
+  lastmodOldest: string | null;
+  /** Percent of the group's URLs that have a lastmod. */
+  lastmodCoverage: number;
+  placeholders: Placeholder[];
 };
 
 const MAX_DISTINCT_LITERALS = 6;
@@ -30,7 +54,7 @@ function wordCount(segment: string): number {
  * Groups URLs into path templates, e.g. /predictions/arsenal-vs-chelsea
  * becomes /predictions/*. Returns groups sorted by size, largest first.
  */
-export function groupByPattern(urls: string[]): PatternGroup[] {
+export function groupByPattern(urls: string[], lastmod?: ReadonlyMap<string, string>): PatternGroup[] {
   const parsed = urls.map((url) => ({ url, segments: segmentsOf(url) }));
 
   // Sections that have pages beneath them, e.g. "blog" when /blog/x exists.
@@ -96,9 +120,133 @@ export function groupByPattern(urls: string[]): PatternGroup[] {
     }
   }
 
+  const total = urls.length;
   return [...groups.entries()]
-    .map(([pattern, groupUrls]) => ({ pattern, count: groupUrls.length, urls: groupUrls }))
+    .map(([pattern, groupUrls]) => describeGroup(pattern, groupUrls, total, lastmod))
     .sort((a, b) => b.count - a.count || a.pattern.localeCompare(b.pattern));
+}
+
+/** Same as groupByPattern; the name used in the analysis code. */
+export const groupUrls = groupByPattern;
+
+function describeGroup(
+  pattern: string,
+  urls: string[],
+  total: number,
+  lastmod?: ReadonlyMap<string, string>,
+): PatternGroup {
+  let newest: string | null = null;
+  let oldest: string | null = null;
+  let dated = 0;
+  if (lastmod) {
+    for (const url of urls) {
+      const value = lastmod.get(url);
+      if (!value) continue;
+      dated++;
+      if (!newest || value > newest) newest = value;
+      if (!oldest || value < oldest) oldest = value;
+    }
+  }
+  return {
+    pattern,
+    count: urls.length,
+    urls,
+    share: total ? Math.round((urls.length / total) * 1000) / 10 : 0,
+    lastmodNewest: newest,
+    lastmodOldest: oldest,
+    lastmodCoverage: urls.length ? Math.round((dated / urls.length) * 100) : 0,
+    placeholders: describePlaceholders(pattern, urls),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Placeholder kinds
+// ---------------------------------------------------------------------------
+
+const DATE_IN_TEXT = /(?:^|[-_.])(?:(?:19|20)\d{2}[-_.]\d{1,2}[-_.]\d{1,2}|\d{1,2}[-_.]\d{1,2}[-_.](?:19|20)\d{2})(?:$|[-_.])/;
+const MONTH_IN_TEXT = /(?:^|[-_])(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*[-_]\d{1,2}(?:st|nd|rd|th)?[-_](?:19|20)\d{2}(?:$|[-_])/i;
+
+export function classifySegment(value: string, previous: string | null): PlaceholderKind {
+  const v = decodeURIComponent(value.replace(/%(?![0-9a-f]{2})/gi, "%25")).replace(/\.(?:html?|php|aspx?)$/i, "");
+  if (/^(?:19|20)\d{2}-\d{1,2}-\d{1,2}$/.test(v) || /^\d{1,2}-\d{1,2}-(?:19|20)\d{2}$/.test(v) || /^(?:19|20)\d{6}$/.test(v)) {
+    return "date";
+  }
+  if (/^(?:19|20)\d{2}$/.test(v)) return "year";
+  if (/^page[-_]?\d+$/i.test(v) || (/^\d{1,4}$/.test(v) && previous !== null && /^(?:page|p|pages|seite|pagina)$/i.test(previous))) {
+    return "page number";
+  }
+  if (/^\d{1,4}$/.test(v)) return "number";
+  if (/^\d{5,}$/.test(v)) return "id";
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v) || /^[0-9a-f]{12,}$/i.test(v)) return "id";
+  if (/^[a-z0-9]{6,}$/i.test(v) && /\d/.test(v) && /[a-z]/i.test(v) && !/^[a-z]+\d{1,3}$/i.test(v)) return "id";
+  if (/[-_]/.test(v) && (DATE_IN_TEXT.test(v) || MONTH_IN_TEXT.test(v))) return "slug with date";
+  if (/^[\p{L}\p{N}]+(?:[-_.~][\p{L}\p{N}]+)*$/u.test(v) && /\p{L}/u.test(v)) return "slug";
+  return "mixed";
+}
+
+const PLACEHOLDER_SAMPLE = 500;
+
+function describePlaceholders(pattern: string, urls: string[]): Placeholder[] {
+  const parts = pattern === "/" ? [] : pattern.slice(1).split("/");
+  const placeholders: Placeholder[] = [];
+  const step = Math.max(1, Math.floor(urls.length / PLACEHOLDER_SAMPLE));
+  const sample = urls.filter((_, index) => index % step === 0).slice(0, PLACEHOLDER_SAMPLE);
+  const segmentsList = sample.map(segmentsOf);
+  parts.forEach((part, position) => {
+    if (part !== "*") return;
+    const values = segmentsList.map((segments) => segments[position]).filter((value): value is string => Boolean(value));
+    const counts = new Map<PlaceholderKind, number>();
+    for (const value of values) {
+      const previous = position > 0 ? parts[position - 1] : null;
+      const kind = classifySegment(value, previous === "*" ? null : previous);
+      counts.set(kind, (counts.get(kind) ?? 0) + 1);
+    }
+    let kind: PlaceholderKind = "mixed";
+    for (const [candidate, count] of counts) {
+      if (values.length && count / values.length >= 0.8) kind = candidate;
+    }
+    const distinct = [...new Set(values)];
+    const examples =
+      distinct.length <= 3
+        ? distinct
+        : [distinct[0], distinct[Math.floor(distinct.length / 2)], distinct[distinct.length - 1]];
+    placeholders.push({ position, kind, examples });
+  });
+  return placeholders;
+}
+
+// ---------------------------------------------------------------------------
+// Pattern matching
+// ---------------------------------------------------------------------------
+
+/**
+ * The most specific pattern that matches a URL (or path), or null. Patterns
+ * match on segment count; * matches exactly one segment; more literal
+ * segments win; "/" only matches the root.
+ */
+export function matchPattern(url: string, patterns: readonly string[]): string | null {
+  const segments = url.startsWith("/") ? url.split(/[?#]/)[0].split("/").filter(Boolean) : segmentsOf(url);
+  let best: string | null = null;
+  let bestScore = -1;
+  for (const pattern of patterns) {
+    const parts = pattern === "/" ? [] : pattern.replace(/^\//, "").split("/").filter(Boolean);
+    if (parts.length !== segments.length) continue;
+    let score = 0;
+    let matches = true;
+    for (let index = 0; index < parts.length; index++) {
+      if (parts[index] === "*") continue;
+      if (parts[index] !== segments[index]) {
+        matches = false;
+        break;
+      }
+      score++;
+    }
+    if (matches && score > bestScore) {
+      best = pattern;
+      bestScore = score;
+    }
+  }
+  return best;
 }
 
 function tokens(text: string): string[] {

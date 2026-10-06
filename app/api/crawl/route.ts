@@ -64,7 +64,7 @@ export async function POST(request: Request) {
     const result = await mapSite(origin, identity);
     const siteOrigin = commonOrigin(result.urls, result.origin);
     // URLs on the main origin are sent as paths to keep the response small.
-    const groups = groupByPattern(result.urls).map((group) => ({
+    const groups = groupByPattern(result.urls, result.lastmod).map((group) => ({
       ...group,
       urls: group.urls.map((url) => (url.startsWith(`${siteOrigin}/`) ? url.slice(siteOrigin.length) : url)),
     }));
@@ -72,6 +72,7 @@ export async function POST(request: Request) {
       origin: siteOrigin,
       source: result.source,
       sitemaps: result.sitemaps,
+      sitemapStats: result.sitemapStats,
       truncated: result.truncated,
       notes: result.notes,
       total: result.urls.length,

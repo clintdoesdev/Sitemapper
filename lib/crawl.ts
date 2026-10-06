@@ -21,11 +21,28 @@ const DEFAULT_SITEMAP_PATHS = ["/sitemap.xml", "/sitemap_index.xml", "/sitemap-i
 const ASSET_EXTENSIONS =
   /\.(?:png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|css|js|mjs|map|json|xml|gz|txt|pdf|zip|rar|woff2?|ttf|otf|eot|mp3|mp4|m4a|m4v|webm|ogg|ogv|wav|mov|avi|wmv|flv)$/i;
 
+export type SitemapStat = {
+  url: string;
+  kind: "index" | "urlset";
+  /** Page URLs (urlset) or child sitemaps (index) listed. */
+  urls: number;
+  withLastmod: number;
+  oldestLastmod: string | null;
+  newestLastmod: string | null;
+  distinctLastmod: number;
+  extensions: { image: boolean; video: boolean; news: boolean; hreflang: boolean };
+  /** 90% or more of entries share one lastmod value. */
+  autoLastmod: boolean;
+};
+
 export type CrawlResult = {
   origin: string;
   source: "sitemap" | "crawl";
   sitemaps: string[];
+  sitemapStats: SitemapStat[];
   urls: string[];
+  /** lastmod per page URL, as an ISO date, when the sitemap gave one. */
+  lastmod: Map<string, string>;
   truncated: boolean;
   notes: string[];
 };
@@ -134,9 +151,84 @@ export function extractLocs(xml: string): string[] {
   return locs;
 }
 
+export type SitemapEntry = { loc: string; lastmod: string | null };
+
+export type ParsedSitemap = {
+  kind: "index" | "urlset";
+  entries: SitemapEntry[];
+  extensions: SitemapStat["extensions"];
+};
+
+/** Normalises a lastmod value to an ISO timestamp, or null when it isn't a date. */
+export function normaliseLastmod(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const time = Date.parse(trimmed);
+  return Number.isNaN(time) ? null : new Date(time).toISOString();
+}
+
+function firstTag(block: string, tag: string): string | null {
+  const match = new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}\\s*>`, "i").exec(block);
+  return match ? decodeEntities(match[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")).trim() : null;
+}
+
+/**
+ * Parses a sitemap document (regex based). Returns null when it is neither a
+ * <urlset> nor a <sitemapindex>. Namespaced tags like <image:loc> are ignored.
+ */
+export function parseSitemap(xml: string): ParsedSitemap | null {
+  const isIndex = /<sitemapindex[\s>]/i.test(xml);
+  const isUrlset = /<urlset[\s>]/i.test(xml);
+  if (!isIndex && !isUrlset) return null;
+  const blockTag = isIndex ? "sitemap" : "url";
+  const entries: SitemapEntry[] = [];
+  const blocks = new RegExp(`<${blockTag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${blockTag}\\s*>`, "gi");
+  for (const match of xml.matchAll(blocks)) {
+    const loc = firstTag(match[1], "loc");
+    const url = loc ? toHttpUrl(loc) : null;
+    if (!url) continue;
+    const lastmod = firstTag(match[1], "lastmod");
+    entries.push({ loc: url, lastmod: lastmod ? normaliseLastmod(lastmod) : null });
+  }
+  // Fall back to bare <loc> tags for malformed documents.
+  if (entries.length === 0) for (const loc of extractLocs(xml)) entries.push({ loc, lastmod: null });
+  return {
+    kind: isIndex ? "index" : "urlset",
+    entries,
+    extensions: {
+      image: /<image:/i.test(xml),
+      video: /<video:/i.test(xml),
+      news: /<news:/i.test(xml),
+      hreflang: /<xhtml:link\b/i.test(xml),
+    },
+  };
+}
+
+/** Per-sitemap statistics, including whether lastmod looks auto-generated. */
+export function sitemapStat(url: string, parsed: ParsedSitemap): SitemapStat {
+  const dated = parsed.entries.map((entry) => entry.lastmod).filter((value): value is string => value !== null);
+  const counts = new Map<string, number>();
+  for (const value of dated) counts.set(value, (counts.get(value) ?? 0) + 1);
+  const top = Math.max(0, ...counts.values());
+  const sorted = [...dated].sort();
+  return {
+    url,
+    kind: parsed.kind,
+    urls: parsed.entries.length,
+    withLastmod: dated.length,
+    oldestLastmod: sorted[0] ?? null,
+    newestLastmod: sorted[sorted.length - 1] ?? null,
+    distinctLastmod: counts.size,
+    extensions: parsed.extensions,
+    autoLastmod: dated.length >= 5 && top / dated.length >= 0.9,
+  };
+}
+
 type SitemapState = {
   sitemaps: string[];
+  stats: SitemapStat[];
   urls: Set<string>;
+  lastmod: Map<string, string>;
   truncated: boolean;
   notes: string[];
 };
@@ -162,20 +254,20 @@ async function readSitemaps(seeds: string[], budget: Budget, state: SitemapState
     const responses = await Promise.all(batch.map((url) => fetchText(url, budget, { maxBytes: MAX_SITEMAP_BYTES })));
     responses.forEach((response, index) => {
       if (!response.ok || response.status >= 400) return;
-      const { text } = response;
-      const isIndex = /<sitemapindex[\s>]/i.test(text);
-      const isUrlset = /<urlset[\s>]/i.test(text);
-      if (!isIndex && !isUrlset) return;
+      const parsed = parseSitemap(response.text);
+      if (!parsed) return;
       state.sitemaps.push(batch[index]);
+      state.stats.push(sitemapStat(batch[index], parsed));
 
-      for (const loc of extractLocs(text)) {
-        if (isIndex) {
+      for (const { loc, lastmod } of parsed.entries) {
+        if (parsed.kind === "index") {
           if (!tried.has(loc) && !queued.has(loc) && !blockedHostReason(new URL(loc).hostname)) {
             queued.add(loc);
             queue.push(loc);
           }
         } else if (state.urls.size < MAX_URLS) {
           state.urls.add(loc);
+          if (lastmod) state.lastmod.set(loc, lastmod);
         } else {
           state.truncated = true;
           break;
@@ -430,7 +522,7 @@ export async function mapSite(origin: string, identity: Identity = "bot"): Promi
       : "";
   const robots = parseRobots(robotsText, origin);
 
-  const state: SitemapState = { sitemaps: [], urls: new Set(), truncated: false, notes };
+  const state: SitemapState = { sitemaps: [], stats: [], urls: new Set(), lastmod: new Map(), truncated: false, notes };
   const tried = new Set<string>();
   const robotsSitemaps = robots.sitemaps.filter((url) => !blockedHostReason(new URL(url).hostname));
 
@@ -454,7 +546,9 @@ export async function mapSite(origin: string, identity: Identity = "bot"): Promi
       origin,
       source: "sitemap",
       sitemaps: state.sitemaps,
+      sitemapStats: state.stats,
       urls: [...state.urls],
+      lastmod: state.lastmod,
       truncated: state.truncated,
       notes,
     };
@@ -469,7 +563,9 @@ export async function mapSite(origin: string, identity: Identity = "bot"): Promi
     origin,
     source: "crawl",
     sitemaps: state.sitemaps,
+    sitemapStats: state.stats,
     urls: crawl.pages,
+    lastmod: new Map(),
     truncated: crawl.truncated,
     notes: crawlNotes,
   };
