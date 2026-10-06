@@ -1,8 +1,9 @@
 "use client";
 
+import { useState } from "react";
 import type { ExtractResult, PageContents } from "@/lib/contents";
 import { textTemplate } from "@/lib/patterns";
-import { formatNumber, plural, secondaryButton, toAbsolute, type Group } from "./ui";
+import { CheckIcon, copyText, CopyIcon, formatNumber, plural, secondaryButton, toAbsolute, type Group } from "./ui";
 
 /** Progress of the current (or last) extraction. */
 export type ExtractionJob = {
@@ -285,6 +286,35 @@ export function ExtractionStatus({ job, onStop }: { job: ExtractionJob; onStop: 
           {job.error}
         </p>
       )}
+    </div>
+  );
+}
+
+/** The link to a job running on the server, so it can be checked from anywhere. */
+export function JobLink({ href, running }: { href: string; running: boolean }) {
+  const [copied, setCopied] = useState<boolean | null>(null);
+  async function copy() {
+    const ok = await copyText(href);
+    setCopied(ok);
+    if (ok) setTimeout(() => setCopied(null), 1800);
+  }
+  return (
+    <div className="mt-4 border-l-2 border-contour pl-4 text-sm leading-relaxed text-muted">
+      <p>
+        <span className="text-ink">{running ? "This runs on the server." : "Saved on the server for 7 days."}</span>{" "}
+        {running
+          ? "You can close this page or switch off your phone. Open this link later to see how far it got and download the page list:"
+          : "Open this link on any device to download the page list again:"}
+      </p>
+      <p className="mt-1 break-all font-mono text-[13px] text-ink">{href}</p>
+      <button
+        type="button"
+        onClick={copy}
+        className="mt-2 inline-flex items-center gap-1.5 text-sm text-ink underline decoration-rule underline-offset-2 hover:text-contour hover:decoration-contour"
+      >
+        {copied ? <CheckIcon /> : <CopyIcon />}
+        <span aria-live="polite">{copied ? "Copied" : copied === false ? "Copying was blocked; copy the link above by hand" : "Copy link"}</span>
+      </button>
     </div>
   );
 }

@@ -8,7 +8,7 @@ Enter any domain and get a list of every page the site publishes, grouped by URL
 2. Reads those sitemaps. If robots.txt lists none, it tries `/sitemap.xml`, `/sitemap_index.xml`, `/sitemap-index.xml` and `/wp-sitemap.xml`. Sitemap indexes are followed breadth-first, and gzipped `.xml.gz` sitemaps are supported.
 3. If no sitemap has any pages, it crawls from the homepage instead. The crawl stays on the same host (www and the bare domain count as one), only reads HTML pages, and respects robots.txt.
 4. Groups the URLs by pattern and shows how many pages each pattern has. You can filter the list, copy the URLs, or download them as a spreadsheet (**Download page list**, CSV with `url,pattern`).
-5. Optionally reads every page. **Read every page** reads every page in the list (or only the ones matching the filter) and pulls out the title, meta description, H1, canonical, robots meta, headings, JSON-LD schema types, internal and external link counts, word count and main text (up to 32,000 characters, the most a spreadsheet cell holds). **Download page list** then includes all of these as extra columns next to each URL. The page also summarises each pattern: the shared title, H1 and description templates (for example `{…} vs {…} Prediction | Site`), the word count range, schema types and the headings most pages share. You can stop at any time; running it again continues with the pages not read yet.
+5. Optionally reads every page. **Read every page** reads every page in the list (or only the ones matching the filter) and pulls out the title, meta description, H1, canonical, robots meta, headings, JSON-LD schema types, internal and external link counts, word count and main text (up to 32,000 characters, the most a spreadsheet cell holds). **Download page list** then includes all of these as extra columns next to each URL. The page also summarises each pattern: the shared title, H1 and description templates (for example `{…} vs {…} Prediction | Site`), the word count range, schema types and the headings most pages share. You can stop at any time; running it again continues with the pages not read yet. With storage connected (see [Reading in the background](#reading-in-the-background)) it runs on the server, so you can close the page or switch off your phone and come back later with the job link.
 
    When a site answers 429 (too many requests), every request pauses for as long as the site asks (its `Retry-After` header), or 10 seconds if it doesn't say. Pages that failed for temporary reasons (429, server errors, timeouts) are retried up to three more times at the end, one page at a time, after 5, 15 and 30 seconds. Sites that block automated requests (403) are reported as blocked in the CSV rather than worked around. The CSV starts with a UTF-8 byte order mark so Excel shows accents and dashes correctly.
 
@@ -67,6 +67,21 @@ In the browser, images, fonts, media and stylesheets are skipped to save time, a
 
 This uses two extra dependencies, [`puppeteer-core`](https://pptr.dev) and [`@sparticuz/chromium`](https://github.com/Sparticuz/chromium) (a Chromium build made for serverless functions). On Vercel nothing needs configuring. Locally, Sitemapper uses your installed Google Chrome, or the path in `CHROME_PATH` if you set it. On Linux it falls back to the serverless Chromium build.
 
+## Reading in the background
+
+Without storage, **Read every page** runs from the open page: close the tab or let your phone sleep and it stops. Connect a free Upstash Redis database and it runs on the server instead:
+
+1. In your Vercel project, open the **Storage** tab, choose **Upstash for Redis** (from the Marketplace), create a free database and connect it to the project. Vercel adds `KV_REST_API_URL` and `KV_REST_API_TOKEN` for you. (`UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` from the Upstash console work too.)
+2. Redeploy.
+
+Press **Read every page** and the address bar gets a job link (`/?job=…`), also shown under the progress bar with a **Copy link** button. Close the page whenever you like. Open the link later, on any device, to see how far it got, and **Download page list** gives the pages with everything read so far. Jobs and their results are kept for 7 days.
+
+How it works: the server reads in slices of about 50 seconds (Vercel's Hobby plan stops a function after 60). Each slice saves its progress to Redis and then calls the app's own `/api/jobs/<id>/run` to start the next one. If a slice is ever lost (a crash or a failed hand-over), opening the job link restarts it from the last saved step. The same politeness rules apply as in the browser: robots.txt is read once per job and respected, affiliate paths are never requested, a 429 pauses the job for as long as the site asks (up to a minute), temporary failures get three slower retry rounds, and JavaScript pages get a second read in a browser. At most 3 jobs run at once on one deployment.
+
+On preview deployments behind Vercel Deployment Protection, the self-call that starts each slice is refused unless you add a **Protection Bypass for Automation** secret (Vercel adds it as `VERCEL_AUTOMATION_BYPASS_SECRET`, which Sitemapper sends along). The production domain isn't protected by default, so it works there without this.
+
+Running locally with `npm run dev`, jobs are kept in memory without any setup and are lost when the server restarts.
+
 ## Limits
 
 | | |
@@ -76,6 +91,7 @@ This uses two extra dependencies, [`puppeteer-core`](https://pptr.dev) and [`@sp
 | Pages crawled (when there's no sitemap) | 300, 4 at a time with a 300 ms pause between batches |
 | Time per domain | 50 seconds in total, 10 seconds per request |
 | Read every page | 5,000 pages per run (run again to continue), 20 per request, 3 requests at a time, each reading 6 pages at once as soon as a slot frees up; robots.txt read once per run and respected |
+| Reading in the background | 5,000 pages per job, 60 pages per step with 18 at once, slices of about 50 seconds, 3 jobs at a time, kept 7 days |
 | Browser rendering | 4 pages per request, 2 tabs at a time, 15 seconds per page |
 | Analysis | Up to 3 pages per pattern, the largest 20 patterns plus the homepage |
 | Page size | Pages stop being read at 3 MB and are marked truncated |
@@ -111,6 +127,7 @@ npm run test:patterns   # the original grouping cases on their own
 1. Push this repository to GitHub.
 2. In Vercel, choose **Add New → Project** and import the repository.
 3. Keep the default settings and deploy. No environment variables are needed.
+4. Optional: connect Upstash Redis so Read every page keeps going with the page closed (see [Reading in the background](#reading-in-the-background)).
 
 The API routes run on the Node.js runtime with `maxDuration = 60`, which the Hobby plan allows. Set the project's Node.js version to 22.x (the default). The Chromium binary is bundled with the API routes through `outputFileTracingIncludes` in `next.config.ts`. The first JavaScript render after a cold start takes a few extra seconds while Chromium unpacks.
 
@@ -129,8 +146,10 @@ The API routes run on the Node.js runtime with `maxDuration = 60`, which the Hob
 - `lib/contents.ts`: the Read every page feature (title, meta tags, headings, schema types, links and main text for every listed page)
 - `lib/render.ts`: starts headless Chromium and returns a page's HTML after its JavaScript has run
 - `app/api/extract/route.ts`: `POST { urls, render }` (at most 10 URLs, or 4 with `render: true`), returns `{ pages }` in the same order
+- `lib/store.ts`: Upstash Redis over REST, or memory when running locally
+- `lib/jobs.ts` and `app/api/jobs/**`: background Read every page jobs. `POST /api/jobs { origin, items: [url, pattern][], identity }` returns `{ id }`; `GET /api/jobs/<id>` is the progress, `GET /api/jobs/<id>/results?offset=` pages through results, `GET /api/jobs/<id>/items` lists the job's pages, `POST /api/jobs/<id>/stop` stops it
 - `app/page.tsx`: the interface; `app/contents.tsx` shows extracted contents and `app/ui.tsx` holds shared icons and helpers
 
 ## Adding storage later
 
-No database is needed for what Sitemapper does today: every request is stateless and results leave through the exports. If you want saved history, or to track how a site's pages and templates change over time (new patterns, pages added or removed, titles rewritten), that's when adding Postgres with Prisma makes sense.
+Apart from the optional Redis for background jobs, no database is needed: results leave through the exports. If you want saved history, or to track how a site's pages and templates change over time (new patterns, pages added or removed, titles rewritten), that's when adding Postgres with Prisma makes sense.

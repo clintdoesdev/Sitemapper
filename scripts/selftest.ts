@@ -6,7 +6,7 @@ import { fetchPage, fetcherConfig } from "../lib/fetcher";
 import { parseRobots, aiBotAccess } from "../lib/robots";
 import { groupByPattern, groupUrls, matchPattern, classifySegment, textTemplate } from "../lib/patterns";
 import { mapSite, parseSitemap, sitemapStat } from "../lib/crawl";
-import { extractPages } from "../lib/contents";
+import { extractPages, type ExtractResult } from "../lib/contents";
 import { analyseHtml, analyseUrls } from "../lib/extract";
 import { checkSite } from "../lib/site";
 import { Budget } from "../lib/fetcher";
@@ -18,6 +18,9 @@ import { findIssues } from "../lib/issues";
 import { buildReport } from "../lib/report";
 import type { AnalysisState, PatternResult } from "../lib/analysis-types";
 import type { PageAnalysis } from "../lib/extract/types";
+import { createJob, getJobItems, getJobResults, getJobStatus, jobsConfig, runSlice, stopJob, type JobMeta } from "../lib/jobs";
+import { memoryStore, storeConfig } from "../lib/store";
+import { POST as runRoute } from "../app/api/jobs/[id]/run/route";
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -357,6 +360,92 @@ test("read every page: a slow page doesn't hold up the others; robots.txt is rea
     assert.equal(again[1].ok, false, "rules from the passed robots.txt still apply");
   } finally {
     fetcherConfig.fetch = shared;
+  }
+});
+
+test("background jobs: read, retry after a 429, hand over between slices, page through results", async () => {
+  resetNetwork();
+  storeConfig.store = memoryStore();
+  const shared = fetcherConfig.fetch;
+  const savedConfig = { ...jobsConfig };
+  const kicks: string[] = [];
+  jobsConfig.retryDelaysMs = [10, 10, 10];
+  jobsConfig.sliceMs = 13_500;
+  jobsConfig.kick = async (meta: JobMeta) => {
+    kicks.push(meta.id);
+    await runSlice(meta.id);
+  };
+  let limitedOnce = false;
+  fetcherConfig.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    requested.push(url);
+    if (url.endsWith("/robots.txt")) return new Response("User-agent: *\nDisallow: /private", { headers: { "content-type": "text/plain" } });
+    if (url.endsWith("/busy") && !limitedOnce) {
+      limitedOnce = true;
+      return new Response("slow down", { status: 429, headers: { "retry-after": "2", "content-type": "text/html" } });
+    }
+    return new Response(`<html><head><title>${url}</title></head><body><main><p>Words for ${url}.</p></main></body></html>`, {
+      headers: { "content-type": "text/html" },
+    });
+  }) as typeof fetch;
+  try {
+    const urls = [
+      ...Array.from({ length: 70 }, (_, i) => `https://example.com/p/${i}`),
+      "https://example.com/busy",
+      "https://example.com/private/x",
+      "https://example.com/go/bookie",
+    ];
+    await assert.rejects(
+      createJob({ origin: "https://example.com", items: [["https://bookie.example/x", "/x"]], identity: "bot", selfOrigin: "http://localhost" }),
+      /Only URLs on example.com/,
+    );
+    const meta = await createJob({
+      origin: "https://example.com",
+      items: [...urls.map((url) => [url, url.startsWith("https://example.com/p/") ? "/p/*" : "/"]), [urls[0], "/p/*"]],
+      identity: "bot",
+      selfOrigin: "http://localhost",
+    });
+    assert.equal(meta.total, urls.length, "duplicate pages are dropped");
+    await runSlice(meta.id);
+
+    const found = await getJobStatus(meta.id);
+    assert.ok(found);
+    assert.equal(found.status.status, "done");
+    assert.equal(found.status.done, urls.length);
+    assert.equal(found.status.failed, 2, "robots.txt and the affiliate path stay failed");
+    assert.ok(kicks.length >= 1, "the slice handed over while the site asked to wait");
+    assert.equal(requested.filter((url) => url.endsWith("/robots.txt")).length, 1, "robots.txt is read once per job");
+    assert.ok(!requested.some((url) => url.includes("/go/") || url.includes("/private/")));
+    assert.ok(!("key" in found.status));
+
+    const all = new Map<string, ExtractResult>();
+    let offset = 0;
+    for (;;) {
+      const page = await getJobResults(meta.id, offset);
+      assert.ok(page);
+      if (page.next === offset) break;
+      for (const result of page.pages) all.set(result.url, result);
+      offset = page.next;
+    }
+    assert.equal(all.size, urls.length);
+    assert.equal(all.get("https://example.com/busy")?.ok, true, "the rate-limited page was read on retry");
+    assert.equal((await getJobItems(meta.id))?.items[0][1], "/p/*");
+
+    const forbidden = await runRoute(new Request(`http://localhost/api/jobs/${meta.id}/run`, { method: "POST" }), {
+      params: Promise.resolve({ id: meta.id }),
+    });
+    assert.equal(forbidden.status, 403);
+
+    const stopped = await createJob({ origin: "https://example.com", items: [[urls[0], "/p/*"]], identity: "bot", selfOrigin: "http://localhost" });
+    assert.ok(await stopJob(stopped.id));
+    requested.length = 0;
+    await runSlice(stopped.id);
+    assert.equal((await getJobStatus(stopped.id))?.status.status, "stopped");
+    assert.equal(requested.length, 0, "a stopped job reads nothing");
+  } finally {
+    fetcherConfig.fetch = shared;
+    Object.assign(jobsConfig, savedConfig);
+    storeConfig.store = undefined;
   }
 });
 

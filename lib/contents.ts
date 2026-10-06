@@ -315,9 +315,13 @@ export async function extractPages(
     robotsTxt?: Readonly<Record<string, string>>;
     /** Filled with the robots.txt text of origins this call had to fetch, for the next request. */
     robotsOut?: Record<string, string>;
+    /** Time allowed for the whole call; pages not started in time come back retryable. */
+    budgetMs?: number;
+    /** Pages read at once (ignored in gentle mode). */
+    concurrency?: number;
   } = {},
 ): Promise<ExtractResult[]> {
-  const budget = new Budget(EXTRACT_BUDGET_MS, options.identity);
+  const budget = new Budget(options.budgetMs ?? EXTRACT_BUDGET_MS, options.identity);
   const results: ExtractResult[] = new Array(urls.length);
   const robotsByOrigin = new Map<string, Promise<Robots>>();
   const robotsFor = (origin: string) => {
@@ -337,7 +341,7 @@ export async function extractPages(
   };
   const valid = validate(urls, results);
   // Gentle mode reads one page at a time with a pause, for sites that rate-limit.
-  const concurrency = options.gentle ? 1 : options.render ? RENDER_CONCURRENCY : EXTRACT_CONCURRENCY;
+  const concurrency = options.gentle ? 1 : options.concurrency ?? (options.render ? RENDER_CONCURRENCY : EXTRACT_CONCURRENCY);
   const pauseMs = options.gentle ? GENTLE_PAUSE_MS : 0;
 
   const handle = async (target: Target, read: (target: Target) => Promise<ExtractResult>) => {

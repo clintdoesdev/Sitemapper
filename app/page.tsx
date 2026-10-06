@@ -17,10 +17,12 @@ import {
   contentCsvCells,
   ContentsSection,
   ExtractionStatus,
+  JobLink,
   type ContentsMap,
   type ExtractionJob,
 } from "./contents";
 import type { ExtractResult } from "@/lib/contents";
+import type { JobStatus } from "@/lib/jobs";
 import { aggregatePattern, buildLinkMap, pickSamples, stackSummary } from "@/lib/aggregate";
 import type { AnalysisState, MapSummary, PatternResult } from "@/lib/analysis-types";
 import type { SitemapStat } from "@/lib/crawl";
@@ -44,6 +46,8 @@ type MapResult = {
   notes: string[];
   total: number;
   groups: Group[];
+  /** Rebuilt from a job link: only the pages that job read. */
+  restored?: boolean;
 };
 
 /** The analysis covers the largest patterns, up to this many. */
@@ -72,6 +76,33 @@ const EXTRACT_WORKERS = 3;
 const RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
 const RETRY_CHUNK = 5;
 const MAX_PAUSE_MS = 60_000;
+/** How often an open page checks on a job running on the server. */
+const JOB_POLL_MS = 3_000;
+
+function jobHref(id: string): string {
+  return `${window.location.origin}${window.location.pathname}?job=${encodeURIComponent(id)}`;
+}
+
+function setJobParam(id: string | null) {
+  const url = new URL(window.location.href);
+  if (id) url.searchParams.set("job", id);
+  else url.searchParams.delete("job");
+  window.history.replaceState(null, "", url);
+}
+
+/** Rebuilds a page list from a job's pages, grouped by the patterns they had when the job started. */
+function restoredResult(origin: string, items: [string, string][]): MapResult {
+  const byPattern = new Map<string, string[]>();
+  for (const [url, pattern] of items) {
+    const urls = byPattern.get(pattern) ?? [];
+    urls.push(url.startsWith(`${origin}/`) ? url.slice(origin.length) : url);
+    byPattern.set(pattern, urls);
+  }
+  const groups = [...byPattern.entries()]
+    .map(([pattern, urls]) => ({ pattern, count: urls.length, urls, share: urls.length / Math.max(items.length, 1) }))
+    .sort((a, b) => b.count - a.count || a.pattern.localeCompare(b.pattern));
+  return { origin, source: "sitemap", sitemaps: [], truncated: false, notes: [], total: items.length, groups, restored: true };
+}
 
 /** Waits `ms`, or rejects as soon as `signal` aborts. */
 function wait(ms: number, signal: AbortSignal): Promise<void> {
@@ -157,6 +188,10 @@ export default function Home() {
   const contentsRef = useRef<ContentsMap>(contents);
   contentsRef.current = contents;
   const [job, setJob] = useState<ExtractionJob | null>(null);
+  /** True when this server can read pages in the background, with the page closed. */
+  const [serverJobs, setServerJobs] = useState(false);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState(false);
   const extractAbort = useRef<AbortController | null>(null);
   const extracting = job?.state === "running";
   const [pagesPerPattern, setPagesPerPattern] = useState<1 | 2 | 3>(2);
@@ -178,6 +213,95 @@ export default function Home() {
       analysisAbort.current?.abort();
     };
   }, []);
+
+  // Background reading, and a job link opened from another device or later on.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/jobs")
+      .then((response) => response.json())
+      .then((data: { enabled?: boolean }) => !cancelled && setServerJobs(data.enabled === true))
+      .catch(() => undefined);
+    const id = new URLSearchParams(window.location.search).get("job");
+    if (id) {
+      setRestoring(true);
+      fetch(`/api/jobs/${encodeURIComponent(id)}/items`)
+        .then(async (response) => {
+          const data = (await response.json().catch(() => null)) as { origin?: string; items?: [string, string][]; error?: string } | null;
+          if (cancelled) return;
+          if (!response.ok || !data?.origin || !data.items) {
+            setError(data?.error ?? "Couldn't open this job link. Try again in a minute.");
+            return;
+          }
+          const restored = restoredResult(data.origin, data.items);
+          setResult(restored);
+          setDomain(new URL(data.origin).hostname);
+          setOpen(new Set(restored.groups[0] ? [restored.groups[0].pattern] : []));
+          setJobId(id);
+        })
+        .catch(() => !cancelled && setError("Couldn't reach the Sitemapper server. Check your connection and try again."))
+        .finally(() => !cancelled && setRestoring(false));
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Follows a job running on the server: progress every few seconds, and new results as they land.
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    let offset = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const pullResults = async (available: number) => {
+      while (!cancelled && offset < available) {
+        const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/results?offset=${offset}`, { cache: "no-store" });
+        const data = (await response.json().catch(() => null)) as { pages?: ExtractResult[]; next?: number } | null;
+        if (!response.ok || !data?.pages || typeof data.next !== "number" || data.next <= offset) return;
+        const pages = data.pages;
+        if (cancelled) return;
+        setContents((current) => {
+          const next = new Map(current);
+          for (const page of pages) next.set(page.url, page);
+          return next;
+        });
+        offset = data.next;
+      }
+    };
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+        const data = (await response.json().catch(() => null)) as (JobStatus & { error?: string }) | null;
+        if (cancelled) return;
+        if (response.status === 404) {
+          setJob((current) => current && { ...current, state: "failed", error: data?.error ?? "This job link has expired." });
+          return;
+        }
+        if (response.ok && data && typeof data.total === "number") {
+          await pullResults(data.results);
+          if (cancelled) return;
+          setJob({
+            total: data.total,
+            done: data.done,
+            rendering: data.rendering,
+            retrying: data.retrying,
+            failed: data.status === "running" ? 0 : data.failed,
+            state: data.status,
+            error: data.error,
+            skipped: data.skipped,
+          });
+          if (data.status !== "running") return;
+        }
+      } catch {
+        // Offline for a moment; try again on the next tick.
+      }
+      if (!cancelled) timer = setTimeout(poll, JOB_POLL_MS);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [jobId]);
 
   // Lower-cased absolute URLs, computed once per result for fast filtering.
   const searchable = useMemo(() => {
@@ -293,6 +417,8 @@ export default function Home() {
       extractAbort.current?.abort();
       setContents(new Map());
       setJob(null);
+      setJobId(null);
+      setJobParam(null);
       analysisAbort.current?.abort();
       setSite(null);
       setSiteError(null);
@@ -315,6 +441,10 @@ export default function Home() {
     const idle = { rendering: null, retrying: null, error: null, failed: 0 };
     if (urls.length === 0) {
       setJob({ ...idle, total: 0, done: 0, state: "done", skipped: 0 });
+      return;
+    }
+    if (serverJobs) {
+      await startServerJob(urls, pending.length - urls.length);
       return;
     }
     const controller = new AbortController();
@@ -459,6 +589,36 @@ export default function Home() {
     }
   }
 
+  /** Hands the reading to the server, which keeps going after this page closes. */
+  async function startServerJob(urls: string[], skipped: number) {
+    if (!result) return;
+    const patternOf = new Map<string, string>();
+    for (const group of visibleGroups) for (const url of group.urls) patternOf.set(toAbsolute(url, result.origin), group.pattern);
+    const idle = { rendering: null, retrying: null, error: null, failed: 0 };
+    setJob({ ...idle, total: urls.length, done: 0, state: "running", skipped });
+    try {
+      const response = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          origin: result.origin,
+          items: urls.map((url) => [url, patternOf.get(url) ?? "/"]),
+          identity: asBrowser ? "browser" : "bot",
+          skipped,
+        }),
+      });
+      const data = (await response.json().catch(() => null)) as { id?: string; error?: string } | null;
+      if (!response.ok || !data?.id) {
+        setJob({ ...idle, total: urls.length, done: 0, state: "failed", skipped, error: data?.error ?? `The server returned an error (status ${response.status}). Try again in a minute.` });
+        return;
+      }
+      setJobId(data.id);
+      setJobParam(data.id);
+    } catch {
+      setJob({ ...idle, total: urls.length, done: 0, state: "failed", skipped, error: "Couldn't reach the Sitemapper server. Check your connection and try again." });
+    }
+  }
+
   /** Site checks (once per map), then sample pages of each pattern, 2 patterns at a time. */
   async function runAnalysis(patternList: string[]) {
     if (!result || analysing || extracting) return;
@@ -563,6 +723,10 @@ export default function Home() {
 
   function stopExtracting() {
     extractAbort.current?.abort();
+    if (jobId && job?.state === "running") {
+      fetch(`/api/jobs/${encodeURIComponent(jobId)}/stop`, { method: "POST" }).catch(() => undefined);
+      setJob((current) => current && { ...current, state: "stopped" });
+    }
   }
 
   function toggle(pattern: string) {
@@ -657,6 +821,12 @@ export default function Home() {
           </label>
           </details>
 
+          {restoring && (
+            <p role="status" className="relative mt-6 text-sm text-muted">
+              Opening the job link.
+            </p>
+          )}
+
           {loading && (
             <div role="status" className="relative mt-6">
               <div className="h-[3px] w-full overflow-hidden rounded-full bg-contour-soft">
@@ -683,9 +853,11 @@ export default function Home() {
               {plural(result.groups.length, "pattern")}.
             </h2>
             <p className="mt-3 max-w-[52ch] text-sm leading-relaxed text-muted">
-              {result.source === "sitemap"
-                ? `Found in ${plural(result.sitemaps.length, "sitemap")}.`
-                : "Found by following links."}{" "}
+              {result.restored
+                ? "These are the pages read by the job in this link. Map the site again for the full list."
+                : result.source === "sitemap"
+                  ? `Found in ${plural(result.sitemaps.length, "sitemap")}.`
+                  : "Found by following links."}{" "}
               A pattern is a group of pages that share one URL shape and usually one template, like /predictions/*.
               {result.notes.map((note) => (
                 <span key={note}> {note}</span>
@@ -792,10 +964,14 @@ export default function Home() {
                     </button>
                     <p className="text-sm leading-relaxed text-muted">
                       Adds each page&apos;s title, headings and text to the page list download.
+                      {serverJobs
+                        ? " Runs on the server, so you can close this page and come back later."
+                        : " Keep this page open until it finishes."}
                       {isFiltering && " Only the pages matching your filter are read."}
                     </p>
                   </div>
                   {job && <ExtractionStatus job={job} onStop={stopExtracting} />}
+                  {jobId && <JobLink href={jobHref(jobId)} running={job?.state === "running"} />}
                 </li>
               </ul>
             </section>
