@@ -126,7 +126,7 @@ The API routes run on the Node.js runtime with `maxDuration = 60`, which the Hob
 - `lib/aggregate.ts`, `lib/issues.ts`, `lib/report.ts`, `lib/exports.ts`: per-pattern and site-wide aggregation, issue rules, the Markdown report and the exports (all browser-safe)
 - `components/`: the analysis UI (site section, pattern tabs, link map, issues, export)
 - `app/api/crawl/route.ts`: `POST { domain }`, returns `{ origin, source, sitemaps, sitemapStats, truncated, notes, total, groups }`. To keep responses small, URLs on `origin` are sent as paths (`/predictions/x`) and the page turns them back into full URLs.
-- `lib/contents.ts`: the Extract contents feature (title, meta tags, headings, schema types, links and main text for every listed page)
+- `lib/contents.ts`: the Read every page feature (title, meta tags, headings, schema types, links and main text for every listed page)
 - `lib/render.ts`: starts headless Chromium and returns a page's HTML after its JavaScript has run
 - `app/api/extract/route.ts`: `POST { urls, render }` (at most 10 URLs, or 4 with `render: true`), returns `{ pages }` in the same order
 - `app/page.tsx`: the interface; `app/contents.tsx` shows extracted contents and `app/ui.tsx` holds shared icons and helpers
