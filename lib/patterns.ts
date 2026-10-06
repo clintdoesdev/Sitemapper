@@ -316,3 +316,16 @@ export function textTemplate(texts: string[]): string | null {
   if (gaps[common.length]) parts.push("{…}");
   return parts.join(" ");
 }
+
+/**
+ * Up to `limit` items spread evenly from the first to the last, so a sample
+ * covers old and new pages alike. With no limit, every item.
+ */
+export function spreadSample<T>(items: readonly T[], limit: number | null): T[] {
+  if (limit === null || items.length <= limit) return [...items];
+  if (limit <= 0) return [];
+  if (limit === 1) return [items[0]];
+  const picked = new Set<number>();
+  for (let i = 0; i < limit; i++) picked.add(Math.round((i * (items.length - 1)) / (limit - 1)));
+  return [...picked].sort((a, b) => a - b).map((index) => items[index]);
+}

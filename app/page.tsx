@@ -26,6 +26,7 @@ import {
 } from "./contents";
 import type { ExtractResult, PageContents } from "@/lib/contents";
 import type { JobStatus } from "@/lib/jobs";
+import { spreadSample } from "@/lib/patterns";
 
 type MapResult = {
   origin: string;
@@ -54,6 +55,9 @@ const MAX_PAUSE_MS = 60_000;
 /** How often an open page checks on a job running on the server. */
 const JOB_POLL_MS = 3_000;
 const MAX_LISTED_URLS = 200;
+/** How many pages to read from each URL group; "all" reads every page. */
+const PER_GROUP_OPTIONS = [3, 5, 10, "all"] as const;
+type PerGroup = (typeof PER_GROUP_OPTIONS)[number];
 
 const primaryButton =
   "inline-flex h-12 w-full items-center justify-center gap-2 rounded-md bg-ink px-5 text-base font-medium whitespace-nowrap text-sheet transition-colors hover:bg-contour disabled:cursor-not-allowed disabled:bg-muted disabled:hover:bg-muted sm:w-auto";
@@ -182,6 +186,7 @@ export default function Home() {
   const [serverJobs, setServerJobs] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
+  const [perGroup, setPerGroup] = useState<PerGroup>(10);
   const [flashed, flash] = useFlash();
   const [copyError, setCopyError] = useState(false);
 
@@ -287,6 +292,16 @@ export default function Home() {
         : [],
     [result],
   );
+  /** The pages Get page contents reads: a spread of up to `perGroup` from each group. */
+  const targets = useMemo(() => {
+    if (!result) return [];
+    return result.groups.flatMap((group) =>
+      spreadSample(group.urls, perGroup === "all" ? null : perGroup).map((url) => ({
+        url: toAbsolute(url, result.origin),
+        pattern: group.pattern,
+      })),
+    );
+  }, [result, perGroup]);
   const read = useMemo(() => {
     const ok: { page: PageContents; pattern: string }[] = [];
     const failed: { url: string; pattern: string; error: string }[] = [];
@@ -344,7 +359,7 @@ export default function Home() {
   /** Reads every page not read yet: on the server when it can, otherwise from this page. */
   async function extractContents() {
     if (!result || extracting) return;
-    const pending = pages.filter((page) => !contentsRef.current.get(page.url)?.ok).map((page) => page.url);
+    const pending = targets.filter((page) => !contentsRef.current.get(page.url)?.ok).map((page) => page.url);
     const urls = pending.slice(0, MAX_EXTRACT_PAGES);
     const skipped = pending.length - urls.length;
     const idle = { rendering: null, retrying: null, error: null, failed: 0 };
@@ -662,14 +677,33 @@ export default function Home() {
                 1. Get page contents
               </h2>
               <p className="mt-2 max-w-[52ch] text-sm leading-relaxed text-muted">
-                Reads each page&apos;s title, description, headings and text. Pages that block tools or need JavaScript are
-                opened in a real browser.{" "}
+                Reads the title, description, headings and text of{" "}
+                {perGroup === "all" ? "every page" : `up to ${perGroup} pages from each group, spread from first to last`}
+                {" "}({plural(targets.length, "page")} in all). Pages that block tools or need JavaScript are opened in a real browser.{" "}
                 {serverJobs
                   ? "It runs on the server, so you can close this page and come back later."
                   : "Keep this page open until it finishes."}
               </p>
-              <div className="mt-4">
-                <button type="button" onClick={extractContents} disabled={result.total === 0 || extracting} className={primaryButton}>
+              <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
+                <label className="flex items-center gap-3 text-sm text-ink">
+                  Pages from each group
+                  <select
+                    value={String(perGroup)}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setPerGroup(value === "all" ? "all" : (Number(value) as PerGroup));
+                    }}
+                    disabled={extracting}
+                    className="h-12 rounded-md border border-rule bg-sheet px-3 text-base text-ink hover:border-contour/60 disabled:text-muted"
+                  >
+                    {PER_GROUP_OPTIONS.map((option) => (
+                      <option key={option} value={String(option)}>
+                        {option === "all" ? "All" : option}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" onClick={extractContents} disabled={targets.length === 0 || extracting} className={primaryButton}>
                   <ExtractIcon />
                   {extracting ? "Reading pages…" : "Get page contents"}
                 </button>

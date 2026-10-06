@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { checkHost, clearGuardCache, guardConfig, isPrivateAddress, blockedHostReason } from "../lib/guard";
 import { fetchPage, fetcherConfig } from "../lib/fetcher";
 import { parseRobots, aiBotAccess } from "../lib/robots";
-import { groupByPattern, groupUrls, matchPattern, classifySegment, textTemplate } from "../lib/patterns";
+import { groupByPattern, groupUrls, matchPattern, classifySegment, spreadSample, textTemplate } from "../lib/patterns";
 import { mapSite, parseSitemap, sitemapStat } from "../lib/crawl";
 import { extractPages, type ExtractResult } from "../lib/contents";
 import { POST as extractRoute } from "../app/api/extract/route";
@@ -113,6 +113,18 @@ test("text templates (extract contents feature) still work", () => {
     ]),
     "{…} vs {…} Prediction, Tips & Odds | Tiporacle",
   );
+});
+
+test("sampling: up to N pages per group, spread from first to last", () => {
+  const items = Array.from({ length: 100 }, (_, i) => i);
+  assert.deepEqual(spreadSample(items, 3), [0, 50, 99]);
+  const ten = spreadSample(items, 10);
+  assert.equal(ten.length, 10);
+  assert.equal(ten[0], 0);
+  assert.equal(ten[9], 99);
+  assert.deepEqual(spreadSample([1, 2], 10), [1, 2]);
+  assert.equal(spreadSample(items, null).length, 100);
+  assert.deepEqual(spreadSample(items, 1), [0]);
 });
 
 test("matchPattern picks the most specific pattern", () => {

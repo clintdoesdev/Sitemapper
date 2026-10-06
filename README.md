@@ -5,8 +5,8 @@ Enter any domain and get every page the site publishes, plus each page's content
 ## Using it
 
 1. **Find pages.** Type a domain. Sitemapper reads the site's sitemaps (or follows links from the homepage when there are none) and lists every page.
-2. **Get page contents.** Reads each page's title, meta description, H1, canonical, robots meta, headings, JSON-LD schema types, link counts, word count and main text (up to 32,000 characters, the most a spreadsheet cell holds).
-3. **Download.** **Spreadsheet (CSV)** or **JSON**: one row per page that was read, with its contents. Pages that couldn't be read are left out, so the file is clean; **The pages that couldn't be read, and why** downloads those separately. **Just the page links** gives every URL and its pattern without contents.
+2. **Get page contents.** Reads up to 10 pages from each URL group (pick 3, 5, 10 or All under **Pages from each group**), spread from the first page in the group to the last, so you get every kind of page without waiting for thousands of near-identical ones. For each page it reads the title, meta description, H1, canonical, robots meta, headings, JSON-LD schema types, link counts, word count and main text (up to 32,000 characters, the most a spreadsheet cell holds).
+3. **Download.** **Spreadsheet (CSV)** or **JSON**: one row per page that was read, with its contents. Pages that couldn't be read are left out, so the file is clean; **The pages that couldn't be read, and why** downloads those separately. **Just the page links** gives every URL on the site and its pattern, without contents.
 
 You can stop at any time; pressing Get page contents again continues with the pages not read yet.
 
