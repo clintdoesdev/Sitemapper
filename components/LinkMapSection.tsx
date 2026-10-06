@@ -13,11 +13,11 @@ export function LinkMapSection({ linkMap }: { linkMap: LinkMap }) {
     ...sources.map((source) => ({ source, edges: linkMap.edges.filter((edge) => edge.source === source) })),
   ];
   return (
-    <section aria-labelledby="linkmap-heading" className="mt-14 border-t border-rule pt-10">
-      <h2 id="linkmap-heading" className="font-display text-2xl font-bold tracking-tight text-ink">
+    <section aria-labelledby="linkmap-heading" className="mt-4">
+      <h2 id="linkmap-heading" className="sr-only">
         Link map
       </h2>
-      <p className="mt-2 max-w-[52ch] text-sm text-muted">Which patterns each analysed pattern links to, counted across its sampled pages.</p>
+      <p className="max-w-[52ch] text-sm text-muted">Which page types link to which, counted on the studied pages. Longer bars mean more links.</p>
       {rows.length === 0 ? (
         <p className="mt-4 text-sm text-muted">No internal links between mapped patterns were found.</p>
       ) : (

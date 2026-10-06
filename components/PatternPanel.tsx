@@ -17,7 +17,7 @@ const TABS: { value: Tab; label: string }[] = [
   { value: "template", label: "Template" },
   { value: "content", label: "Content" },
   { value: "links", label: "Links" },
-  { value: "signals", label: "Signals" },
+  { value: "signals", label: "Ads and trust" },
   { value: "issues", label: "Issues" },
 ];
 

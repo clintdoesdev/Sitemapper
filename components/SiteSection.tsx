@@ -35,10 +35,11 @@ export function SiteSection({ site, map, stack }: { site: SiteReport; map: MapSu
   const h = site.host;
 
   return (
-    <section aria-labelledby="site-heading" className="mt-12">
-      <h2 id="site-heading" className="font-display text-2xl font-bold tracking-tight text-ink">
+    <section aria-labelledby="site-heading" className="mt-4">
+      <h2 id="site-heading" className="sr-only">
         Site
       </h2>
+      <p className="max-w-[52ch] text-sm text-muted">Site-wide files and settings, and the tech behind the site.</p>
       <FieldList className="mt-4">
         <Field label="robots.txt">
           {robots.present ? (

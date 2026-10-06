@@ -7,8 +7,8 @@ Enter any domain and get a list of every page the site publishes, grouped by URL
 1. Reads `/robots.txt` for `Sitemap:` lines and the `Allow`/`Disallow` rules for `User-agent: *`.
 2. Reads those sitemaps. If robots.txt lists none, it tries `/sitemap.xml`, `/sitemap_index.xml`, `/sitemap-index.xml` and `/wp-sitemap.xml`. Sitemap indexes are followed breadth-first, and gzipped `.xml.gz` sitemaps are supported.
 3. If no sitemap has any pages, it crawls from the homepage instead. The crawl stays on the same host (www and the bare domain count as one), only reads HTML pages, and respects robots.txt.
-4. Groups the URLs by pattern and shows how many pages each pattern has. You can filter the list, copy the URLs, or download them as CSV (`url,pattern`).
-5. Optionally extracts page contents. **Extract contents** reads every page in the list (or only the ones matching the filter) and pulls out the title, meta description, H1, canonical, robots meta, headings, JSON-LD schema types, internal and external link counts, word count and main text (up to 32,000 characters, the most a spreadsheet cell holds). **Download CSV** then includes all of these as extra columns next to each URL. The page also summarises each pattern: the shared title, H1 and description templates (for example `{…} vs {…} Prediction | Site`), the word count range, schema types and the headings most pages share. You can stop at any time; running it again continues with the pages not read yet.
+4. Groups the URLs by pattern and shows how many pages each pattern has. You can filter the list, copy the URLs, or download them as a spreadsheet (**Download page list**, CSV with `url,pattern`).
+5. Optionally reads every page. **Read every page** reads every page in the list (or only the ones matching the filter) and pulls out the title, meta description, H1, canonical, robots meta, headings, JSON-LD schema types, internal and external link counts, word count and main text (up to 32,000 characters, the most a spreadsheet cell holds). **Download page list** then includes all of these as extra columns next to each URL. The page also summarises each pattern: the shared title, H1 and description templates (for example `{…} vs {…} Prediction | Site`), the word count range, schema types and the headings most pages share. You can stop at any time; running it again continues with the pages not read yet.
 
    When a site answers 429 (too many requests), every request pauses for as long as the site asks (its `Retry-After` header), or 10 seconds if it doesn't say. Pages that failed for temporary reasons (429, server errors, timeouts) are retried up to three more times at the end, one page at a time, after 5, 15 and 30 seconds. Sites that block automated requests (403) are reported as blocked in the CSV rather than worked around. The CSV starts with a UTF-8 byte order mark so Excel shows accents and dashes correctly.
 
@@ -16,7 +16,7 @@ Each request is stateless. There's no database and no login. Results live in the
 
 ## Analysing how the site is built
 
-After mapping, choose **Pages per pattern** (1, 2 or 3; default 2) and press **Analyse N patterns**. Sitemapper analyses the largest 20 patterns and the homepage; each expanded pattern also has **Analyse this pattern**. Sample pages come from the start, middle and end of each group, because sitemaps are often ordered by date. **Stop analysis** cancels and keeps what has finished.
+After mapping, choose **Pages per pattern** (1, 2 or 3; default 2) and press **Study sample pages**. Sitemapper analyses the largest 20 patterns and the homepage; each expanded pattern also has **Analyse this pattern**. Sample pages come from the start, middle and end of each group, because sitemaps are often ordered by date. **Stop** cancels and keeps what has finished.
 
 1. **Site checks** (once per mapped site, before the pages): robots.txt (groups, disallow rules, crawl-delay, declared sitemaps, and whether GPTBot, ClaudeBot, CCBot, Google-Extended, PerplexityBot and Bytespider are blocked), ads.txt and app-ads.txt (DIRECT/RESELLER counts, ad systems, OWNERDOMAIN, MANAGERDOMAIN), llms.txt, security.txt, humans.txt, the web manifest, http to https, www versus the bare domain, trailing slashes, how a made-up URL is answered (real 404, soft 404 or redirect), the homepage's caching and security headers, and a full analysis of the homepage.
 2. **Page analysis** for each sample:
@@ -32,12 +32,20 @@ After mapping, choose **Pages per pattern** (1, 2 or 3; default 2) and press **A
 4. **Site-wide**: a link map between patterns, patterns no sampled page links to, internal URLs that aren't in the sitemap, the stack, third parties and niche split.
 5. **Issues** with a severity, a one-line explanation, affected patterns and example URLs. Pages behind bot protection are listed separately and don't count as site issues.
 
-### Exports
+### Using the page
 
-- **Copy report** and **Download report**: Markdown (`<host>-sitemapper-report.md`), facts only, in the same section order for every site so reports compare cleanly. Every sampled URL is a full link.
-- **Download JSON**: the full result (`<host>-sitemapper.json`), including every mapped URL.
-- **Download page data**: one row per sampled page (`<host>-pages-analysed.csv`).
-- **Copy URLs** and **Download CSV** work as before.
+After you map a site, the page shows three things in order:
+
+1. **Download**: every file in one place, each with a sentence saying what's inside.
+   - **Download page list**: a spreadsheet (CSV) of every page and its URL pattern, or only the pages matching your filter. After **Read every page** it also holds each page's title, headings and text. **Copy the page links instead** copies the URLs.
+   - **Download report**: a readable Markdown summary of how the site is built (`<host>-sitemapper-report.md`), facts only, in the same section order for every site so reports compare cleanly. Every studied URL is a full link. **Copy the report instead** copies it.
+   - **Download studied pages**: one row per studied page (`<host>-pages-analysed.csv`).
+   - **Download everything**: the full result as JSON (`<host>-sitemapper.json`), including every mapped URL.
+   The last three unlock once you've studied sample pages.
+2. **Want more detail?**: two optional ways to dig deeper. **Study sample pages** (recommended) opens 1 to 3 pages from each of the 20 biggest patterns plus the homepage. **Read every page** adds each page's title, headings and text to the page list.
+3. **Results**, in tabs: **Pages** (the patterns, each with URLs, Template, Content, Links, Ads and trust, and Issues views), **Problems**, **Site** (site files, host behaviour, stack, and method and limits) and **Links** (the link map).
+
+The "Send requests as a regular browser" setting is under **Advanced options** below the domain field.
 
 ### Politeness and safety
 

@@ -42,11 +42,11 @@ export function IssueList({ issues }: { issues: readonly Issue[] }) {
 
 export function IssuesSection({ issues, blocked }: { issues: readonly Issue[]; blocked: readonly BlockedPage[] }) {
   return (
-    <section aria-labelledby="issues-heading" className="mt-14 border-t border-rule pt-10">
-      <h2 id="issues-heading" className="font-display text-2xl font-bold tracking-tight text-ink">
+    <section aria-labelledby="issues-heading" className="mt-4">
+      <h2 id="issues-heading" className="sr-only">
         Issues
       </h2>
-      <p className="mt-2 max-w-[52ch] text-sm text-muted">Found in the sampled pages and site checks, most serious first.</p>
+      <p className="max-w-[52ch] text-sm text-muted">Problems found on the studied pages and in the site checks, most serious first. Red ones matter most.</p>
       {issues.length === 0 && <p className="mt-4 text-sm text-muted">No issues found in the sampled pages.</p>}
       {(["high", "medium", "low"] as const).map((severity) => {
         const items = issues.filter((issue) => issue.severity === severity);

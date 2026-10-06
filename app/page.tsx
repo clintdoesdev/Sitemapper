@@ -2,11 +2,8 @@
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
-  CheckIcon,
   ChevronIcon,
   copyText,
-  CopyIcon,
-  DownloadIcon,
   ExtractIcon,
   downloadCsv,
   formatNumber,
@@ -31,7 +28,7 @@ import type { PageAnalysis } from "@/lib/extract/types";
 import { findIssues, issuesForPattern } from "@/lib/issues";
 import type { SiteReport } from "@/lib/site";
 import { Segmented } from "@/components/bits";
-import { ExportSection } from "@/components/ExportSection";
+import { DownloadPanel } from "@/components/DownloadPanel";
 import { IssuesSection } from "@/components/IssuesSection";
 import { LinkMapSection } from "@/components/LinkMapSection";
 import { MethodLimits } from "@/components/MethodLimits";
@@ -122,6 +119,14 @@ const CONTOURS = [
   "M655.6 254.0C644.5 289.5 577.2 321.0 544.6 348.1C512.0 375.2 488.7 387.4 460.1 416.3C431.4 445.3 413.0 505.0 372.5 522.0C331.9 539.0 264.4 529.1 216.6 518.4C168.8 507.7 121.1 483.6 85.6 457.7C50.1 431.8 17.0 397.0 3.5 363.1C-10.0 329.1 8.0 291.7 4.4 254.0C0.9 216.3 -30.1 172.2 -18.0 136.9C-5.9 101.5 35.2 57.3 77.0 41.8C118.7 26.4 185.0 47.9 232.6 44.2C280.2 40.4 316.8 19.3 362.7 19.5C408.5 19.6 466.2 25.9 507.6 45.1C549.1 64.4 586.6 100.1 611.2 134.9C635.9 169.7 666.7 218.5 655.6 254.0Z",
 ];
 
+function StudyFirst({ what }: { what: string }) {
+  return (
+    <p className="mt-6 max-w-[52ch] border-l-2 border-rule pl-3 text-sm text-muted">
+      To see {what}, press <span className="text-ink">Study sample pages</span> under &ldquo;Want more detail?&rdquo; above.
+    </p>
+  );
+}
+
 function Contours() {
   return (
     <svg
@@ -148,9 +153,6 @@ export default function Home() {
   const [result, setResult] = useState<MapResult | null>(null);
   const [filter, setFilter] = useState("");
   const [open, setOpen] = useState<Set<string>>(new Set());
-  const [copied, setCopied] = useState(false);
-  const [copyError, setCopyError] = useState<string | null>(null);
-  const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [contents, setContents] = useState<ContentsMap>(new Map());
   const contentsRef = useRef<ContentsMap>(contents);
   contentsRef.current = contents;
@@ -166,12 +168,12 @@ export default function Home() {
   const [run, setRun] = useState<RunState | null>(null);
   const analysisAbort = useRef<AbortController | null>(null);
   const analysing = run?.state === "running";
+  const [view, setView] = useState<"pages" | "problems" | "site" | "links">("pages");
 
   const deferredFilter = useDeferredValue(filter);
 
   useEffect(() => {
     return () => {
-      if (copiedTimer.current) clearTimeout(copiedTimer.current);
       extractAbort.current?.abort();
       analysisAbort.current?.abort();
     };
@@ -288,8 +290,6 @@ export default function Home() {
       setResult(next);
       setFilter("");
       setOpen(new Set(next.groups[0] ? [next.groups[0].pattern] : []));
-      setCopied(false);
-      setCopyError(null);
       extractAbort.current?.abort();
       setContents(new Map());
       setJob(null);
@@ -298,6 +298,7 @@ export default function Home() {
       setSiteError(null);
       setResults({});
       setRun(null);
+      setView("pages");
     } catch {
       setError("Couldn't reach the Sitemapper server. Check your connection and try again.");
     } finally {
@@ -570,20 +571,10 @@ export default function Home() {
     });
   }
 
-  async function handleCopy() {
-    if (!result) return;
-    const text = visibleGroups
-      .flatMap((group) => group.urls.map((url) => toAbsolute(url, result.origin)))
-      .join("\n");
-    const ok = await copyText(text);
-    if (!ok) {
-      setCopyError("This browser blocked copying. Use Download CSV instead.");
-      return;
-    }
-    setCopyError(null);
-    setCopied(true);
-    if (copiedTimer.current) clearTimeout(copiedTimer.current);
-    copiedTimer.current = setTimeout(() => setCopied(false), 1800);
+  /** Copies every listed page URL; true when the browser allowed it. */
+  async function copyUrls(): Promise<boolean> {
+    if (!result) return false;
+    return copyText(visibleGroups.flatMap((group) => group.urls.map((url) => toAbsolute(url, result.origin))).join("\n"));
   }
 
   function handleDownload() {
@@ -611,8 +602,8 @@ export default function Home() {
               See every page a site publishes
             </h1>
             <p className="mt-5 max-w-[52ch] text-base leading-relaxed text-muted sm:text-lg">
-              Reads the site&apos;s sitemap, or follows its links if it has none, groups the pages by URL pattern,
-              then opens sample pages to show how each template is built.
+              Type a website&apos;s address. Sitemapper lists every page on it, grouped by type, so you can download
+              the list or study how the pages are built.
             </p>
           </div>
 
@@ -644,7 +635,9 @@ export default function Home() {
             </button>
           </form>
 
-          <label className="relative mt-4 flex max-w-[52ch] cursor-pointer items-start gap-3 text-sm text-ink">
+          <details className="relative mt-4 max-w-[52ch] text-sm">
+            <summary className="cursor-pointer text-muted hover:text-contour">Advanced options</summary>
+          <label className="mt-3 flex cursor-pointer items-start gap-3 text-sm text-ink">
             <input
               type="checkbox"
               checked={asBrowser}
@@ -655,10 +648,11 @@ export default function Home() {
               Send requests as a regular browser
               <span className="mt-0.5 block text-muted">
                 For sites that block tools. Uses a standard Chrome identity instead of SitemapperBot, and retries
-                blocked pages in a real browser. Applies to mapping and extracting.
+                blocked pages in a real browser. Applies to mapping and Read every page, not to studying sample pages.
               </span>
             </span>
           </label>
+          </details>
 
           {loading && (
             <div role="status" className="relative mt-6">
@@ -688,17 +682,51 @@ export default function Home() {
             <p className="mt-3 max-w-[52ch] text-sm leading-relaxed text-muted">
               {result.source === "sitemap"
                 ? `Found in ${plural(result.sitemaps.length, "sitemap")}.`
-                : "Found by following links."}
+                : "Found by following links."}{" "}
+              A pattern is a group of pages that share one URL shape and usually one template, like /predictions/*.
               {result.notes.map((note) => (
                 <span key={note}> {note}</span>
               ))}
             </p>
 
-            {largestPatterns.length > 0 && (
-              <div className="mt-8">
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="flex items-center gap-3">
-                    <span aria-hidden="true" className="text-sm text-ink">
+            <DownloadPanel
+              host={host}
+              state={analysisState}
+              groupsWithUrls={absoluteGroups}
+              pageCount={visibleTotal}
+              filtered={isFiltering}
+              hasContents={contents.size > 0}
+              onDownloadPages={handleDownload}
+              onCopyUrls={copyUrls}
+            />
+
+            <section aria-labelledby="study-heading" className="mt-12">
+              <h2 id="study-heading" className="font-display text-2xl font-bold tracking-tight text-ink">
+                Want more detail?
+              </h2>
+              <p className="mt-2 max-w-[52ch] text-sm text-muted">
+                Optional. Pick one. The downloads above fill in as it runs.
+              </p>
+              <ul className="mt-4 divide-y divide-rule border-y border-rule">
+                <li className="py-5">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-5">
+                    <button
+                      type="button"
+                      onClick={() => runAnalysis(largestPatterns)}
+                      disabled={analysing || extracting || largestPatterns.length === 0}
+                      className="inline-flex h-11 w-full shrink-0 items-center justify-center rounded-md bg-ink px-4 text-sm font-medium whitespace-nowrap text-sheet transition-colors hover:bg-contour disabled:cursor-not-allowed disabled:bg-muted disabled:hover:bg-muted sm:w-56"
+                    >
+                      {analysing ? "Studying…" : "Study sample pages"}
+                    </button>
+                    <p className="text-sm leading-relaxed text-muted">
+                      <span className="text-ink">Recommended.</span> Opens {pagesPerPattern}{" "}
+                      {pagesPerPattern === 1 ? "page" : "pages"} from each of the{" "}
+                      {largestPatterns.length === 1 ? "biggest pattern" : `${formatNumber(largestPatterns.length)} biggest patterns`}, plus the
+                      homepage, and works out how the site is built: page templates, tech, links, ads and problems. Takes about a minute.
+                    </p>
+                  </div>
+                  <div className="mt-3 flex items-center gap-3 sm:pl-[15.25rem]">
+                    <span aria-hidden="true" className="text-sm text-muted">
                       Pages per pattern
                     </span>
                     <Segmented
@@ -706,21 +734,9 @@ export default function Home() {
                       options={PAGES_PER_PATTERN}
                       value={pagesPerPattern}
                       onChange={(value) => setPagesPerPattern(value)}
+                      size="sm"
                     />
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => runAnalysis(largestPatterns)}
-                    disabled={analysing || extracting}
-                    className="h-11 shrink-0 rounded-md bg-ink px-5 text-sm font-medium text-sheet transition-colors hover:bg-contour disabled:cursor-not-allowed disabled:bg-muted disabled:hover:bg-muted"
-                  >
-                    {analysing ? "Analysing…" : `Analyse ${plural(largestPatterns.length, "pattern")}`}
-                  </button>
-                </div>
-                <p className="mt-2 max-w-[52ch] text-sm text-muted">
-                  Analyses the largest {largestPatterns.length === 1 ? "pattern" : `${formatNumber(largestPatterns.length)} patterns`} and
-                  the homepage.
-                </p>
                 {run && (
                   <div className="mt-4">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -735,7 +751,7 @@ export default function Home() {
                       </p>
                       {run.state === "running" && (
                         <button type="button" onClick={stopAnalysis} className={secondaryButton.replace("flex-1 ", "")}>
-                          Stop analysis
+                          Stop
                         </button>
                       )}
                     </div>
@@ -758,15 +774,52 @@ export default function Home() {
                     )}
                   </div>
                 )}
-                {siteError && <p className="mt-3 border-l-2 border-alert pl-3 text-sm text-ink">Site checks failed: {siteError}</p>}
+                  {siteError && <p className="mt-3 border-l-2 border-alert pl-3 text-sm text-ink">Site checks failed: {siteError}</p>}
+                </li>
+                <li className="py-5">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-5">
+                    <button
+                      type="button"
+                      onClick={extractContents}
+                      disabled={visibleTotal === 0 || extracting || analysing}
+                      className="inline-flex h-11 w-full shrink-0 items-center justify-center gap-2 rounded-md border border-rule px-4 text-sm font-medium whitespace-nowrap text-ink transition-colors hover:border-contour hover:text-contour disabled:cursor-not-allowed disabled:text-muted disabled:hover:border-rule sm:w-56"
+                    >
+                      <ExtractIcon />
+                      {extracting ? "Reading…" : "Read every page"}
+                    </button>
+                    <p className="text-sm leading-relaxed text-muted">
+                      Adds each page&apos;s title, headings and text to the page list download. Slower: a few minutes per thousand pages.
+                      {isFiltering && " Only the pages matching your filter are read."}
+                    </p>
+                  </div>
+                  {job && <ExtractionStatus job={job} onStop={stopExtracting} />}
+                </li>
+              </ul>
+            </section>
+
+            <section aria-labelledby="results-heading" className="mt-12">
+              <h2 id="results-heading" className="font-display text-2xl font-bold tracking-tight text-ink">
+                Results
+              </h2>
+              <div className="mt-3">
+                <Segmented
+                  legend="Show results"
+                  options={[
+                    { value: "pages", label: "Pages" },
+                    { value: "problems", label: analysisState ? `Problems (${findings.issues.length})` : "Problems" },
+                    { value: "site", label: "Site" },
+                    { value: "links", label: "Links" },
+                  ]}
+                  value={view}
+                  onChange={setView}
+                />
               </div>
-            )}
 
-            {site && analysisState && <SiteSection site={site} map={analysisState.map} stack={stack} />}
-
-            {result.total > 0 && (
-              <>
-                <div className="mt-8 flex flex-col gap-3">
+              {view === "pages" && result.total > 0 && (
+                <>
+                  <p className="mt-4 max-w-[52ch] text-sm text-muted">
+                    Pages grouped by URL pattern. Open a pattern to see its pages and, once studied, how it&apos;s built.
+                  </p>
                   <label htmlFor="filter" className="sr-only">
                     Filter URLs
                   </label>
@@ -780,57 +833,16 @@ export default function Home() {
                     placeholder="Filter URLs, like premier-league"
                     value={filter}
                     onChange={(event) => setFilter(event.target.value)}
-                    className="h-11 w-full min-w-0 rounded-md border border-rule bg-sheet px-3 text-sm text-ink placeholder:text-muted hover:border-contour/60"
+                    className="mt-4 h-11 w-full min-w-0 rounded-md border border-rule bg-sheet px-3 text-sm text-ink placeholder:text-muted hover:border-contour/60"
                   />
-                  <div className="flex flex-wrap gap-3">
-                    <button
-                      type="button"
-                      onClick={handleCopy}
-                      disabled={visibleTotal === 0}
-                      className={secondaryButton}
-                    >
-                      {copied ? <CheckIcon /> : <CopyIcon />}
-                      <span aria-live="polite">{copied ? "Copied" : "Copy URLs"}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleDownload}
-                      disabled={visibleTotal === 0}
-                      className={secondaryButton}
-                    >
-                      <DownloadIcon />
-                      Download CSV
-                    </button>
-                    <button
-                      type="button"
-                      onClick={extractContents}
-                      disabled={visibleTotal === 0 || extracting || analysing}
-                      className={secondaryButton}
-                    >
-                      <ExtractIcon />
-                      Extract contents
-                    </button>
+                  <div aria-live="polite" className="text-sm text-muted">
+                    {isFiltering && (
+                      <p className="mt-3">
+                        {formatNumber(visibleTotal)} of {plural(result.total, "URL")}{" "}
+                        {visibleTotal === 1 ? "matches" : "match"}. The page list download only includes these.
+                      </p>
+                    )}
                   </div>
-                </div>
-                {job ? (
-                  <ExtractionStatus job={job} onStop={stopExtracting} />
-                ) : (
-                  <p className="mt-3 max-w-[52ch] text-sm text-muted">
-                    Extract contents reads every listed page for its title, description, headings and text, and adds
-                    them to the CSV.
-                  </p>
-                )}
-
-                <div aria-live="polite" className="text-sm text-muted">
-                  {copyError && <p className="mt-3 border-l-2 border-alert pl-3 text-ink">{copyError}</p>}
-                  {isFiltering && (
-                    <p className="mt-3">
-                      {formatNumber(visibleTotal)} of {plural(result.total, "URL")}{" "}
-                      {visibleTotal === 1 ? "matches" : "match"}.
-                    </p>
-                  )}
-                </div>
-
                 {visibleGroups.length > 0 && (
                   <ul className="mt-5 divide-y divide-rule rounded-md border border-rule">
                     {visibleGroups.map((group, index) => {
@@ -892,15 +904,24 @@ export default function Home() {
                     })}
                   </ul>
                 )}
-              </>
-            )}
+                  <ContentsSection groups={visibleGroups} contents={contents} origin={result.origin} />
+                </>
+              )}
 
-            {analysisState && linkMap && analysisState.patterns.length > 0 && <LinkMapSection linkMap={linkMap} />}
-            {analysisState && <IssuesSection issues={findings.issues} blocked={findings.blocked} />}
-            {analysisState && <ExportSection state={analysisState} groupsWithUrls={absoluteGroups} />}
+              {view === "problems" &&
+                (analysisState ? (
+                  <IssuesSection issues={findings.issues} blocked={findings.blocked} />
+                ) : (
+                  <StudyFirst what="the problems Sitemapper finds" />
+                ))}
 
-            <ContentsSection groups={visibleGroups} contents={contents} origin={result.origin} />
-
+              {view === "site" && (
+                <>
+                  {site && analysisState ? (
+                    <SiteSection site={site} map={analysisState.map} stack={stack} />
+                  ) : (
+                    <StudyFirst what="the site's robots.txt, ads.txt, tech stack and hosting" />
+                  )}
             {result.sitemaps.length > 0 && (
               <details className="mt-10 text-sm">
                 <summary className="cursor-pointer text-muted hover:text-contour">
@@ -922,7 +943,17 @@ export default function Home() {
                 </ul>
               </details>
             )}
-            {analysisState && <MethodLimits state={analysisState} blocked={findings.blocked} />}
+                  {analysisState && <MethodLimits state={analysisState} blocked={findings.blocked} />}
+                </>
+              )}
+
+              {view === "links" &&
+                (analysisState && linkMap && analysisState.patterns.length > 0 ? (
+                  <LinkMapSection linkMap={linkMap} />
+                ) : (
+                  <StudyFirst what="which page types link to which" />
+                ))}
+            </section>
           </section>
         )}
       </main>
