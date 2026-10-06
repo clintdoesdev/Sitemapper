@@ -1,5 +1,6 @@
 import { BOT_PROTECTION_MESSAGE, Budget, fetchPage, inBatches } from "../fetcher";
 import { sameSite } from "../guard";
+import { isAffiliatePath } from "../affiliate";
 import type { Robots } from "../robots";
 import { allElements, byTag, documentOrder, inlineText, parseDocument, visibleText } from "./dom";
 import { analyseHead } from "./head";
@@ -82,6 +83,9 @@ export async function analyseUrl(
     headers: {},
     data: null,
   };
+  if (isAffiliatePath(url)) {
+    return { ...base, outcome: "affiliate", message: "Affiliate redirect path: recorded, not requested." };
+  }
   if (!options.robots.isAllowed(url)) {
     return { ...base, outcome: "robots", message: "Skipped: robots.txt disallows this URL for SitemapperBot." };
   }

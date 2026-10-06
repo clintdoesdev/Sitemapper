@@ -203,7 +203,7 @@ export type PageAnalysis = {
   finalUrl: string;
   status: number;
   /** "ok", or why there is no data. */
-  outcome: "ok" | "blocked" | "robots" | "error" | "not-html" | "off-host";
+  outcome: "ok" | "blocked" | "robots" | "error" | "not-html" | "off-host" | "affiliate";
   message: string | null;
   redirectChain: RedirectHop[];
   offHostRedirect: string | null;

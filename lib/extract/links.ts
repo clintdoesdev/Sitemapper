@@ -5,8 +5,7 @@ import { attr, byTag, closest, collapse, hostOf, inlineText, resolveUrl, tally }
 import { classifyHost } from "./hosts";
 import type { LinksInfo } from "./types";
 
-/** Internal paths sites use to send visitors on to affiliates. Recorded, never fetched. */
-export const AFFILIATE_PATH = /^\/(?:go|out|visit|recommends|link|bet|refer|redirect|goto|click)\//i;
+import { AFFILIATE_PATH } from "../affiliate";
 const TRACKING_PARAM = /^(?:aff|affid|aff_id|affiliate|ref|btag|clickid|click_id|subid|sub_id|pid|utm_[a-z]+)$/i;
 const MESSAGING: [RegExp, string][] = [
   [/^(?:[\w-]+\.)?t\.me$|^telegram\.me$/, "Telegram"],

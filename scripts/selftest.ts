@@ -297,6 +297,36 @@ test("map: robots.txt sitemaps, index, lastmod and private sitemap URLs", async 
   assert.ok(!requested.some((url) => url.includes("evil.example") || url.includes("10.0.0.5")), "private sitemap URLs are never fetched");
 });
 
+test("crawl fallback: affiliate paths and off-site redirects are never requested", async () => {
+  resetNetwork({
+    "https://tips.example/": {
+      body: '<html><body><main><a href="/predictions/a/">A</a><a href="/go/bookie/">Bet now</a><a href="/out/x">Out</a><a href="/moved/">Moved</a></main></body></html>',
+    },
+    "https://tips.example/predictions/a/": { body: "<html><body><p>Prediction</p></body></html>" },
+    "https://tips.example/moved/": { status: 301, headers: { location: "https://bookie.example/landing" } },
+    "https://tips.example/go/bookie/": { status: 302, headers: { location: "https://bookie.example/?aff=1" } },
+  });
+  const result = await mapSite("https://tips.example");
+  assert.equal(result.source, "crawl");
+  assert.deepEqual(result.urls, ["https://tips.example/", "https://tips.example/predictions/a/"]);
+  assert.ok(!requested.some((url) => url.includes("/go/") || url.includes("/out/")), requested.join(", "));
+  assert.ok(!requested.some((url) => url.includes("bookie.example")), "off-site redirect targets aren't fetched");
+});
+
+test("analysis: affiliate paths are recorded, not requested", async () => {
+  resetNetwork(tipsSite());
+  const { parseRobots } = await import("../lib/robots");
+  const pages = await analyseUrls(["https://tips.example/go/bet9ja/"], {
+    pattern: "/go/*",
+    patterns: PATTERNS,
+    robots: parseRobots("", "https://tips.example"),
+    siteHost: "tips.example",
+    budget: new Budget(),
+  });
+  assert.equal(pages[0].outcome, "affiliate");
+  assert.equal(requested.length, 0);
+});
+
 // ---------------------------------------------------------------------------
 // robots.txt
 // ---------------------------------------------------------------------------

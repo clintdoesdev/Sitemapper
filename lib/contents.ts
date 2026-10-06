@@ -2,6 +2,7 @@ import { decodeEntities, looksJavaScriptBuilt, toHttpUrl } from "./crawl";
 import { Budget, fetchText, type Identity } from "./fetcher";
 import { blockedHostReason } from "./guard";
 import { parseRobots, type Robots } from "./robots";
+import { isAffiliatePath } from "./affiliate";
 import { renderPage, withBrowser } from "./render";
 
 export const MAX_EXTRACT_URLS = 10;
@@ -286,6 +287,10 @@ function validate(urls: string[], results: ExtractResult[]): Target[] {
     const parsed = new URL(url);
     if (blockedHostReason(parsed.hostname)) {
       results[index] = { url: raw, ok: false, error: "Private and local addresses can't be read." };
+      return;
+    }
+    if (isAffiliatePath(url)) {
+      results[index] = { url: raw, ok: false, error: "Affiliate redirect path: recorded, not requested." };
       return;
     }
     valid.push({ index, url, origin: parsed.origin });

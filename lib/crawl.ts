@@ -1,4 +1,5 @@
-import { blockedHostReason } from "./guard";
+import { isAffiliatePath } from "./affiliate";
+import { blockedHostReason, sameSite } from "./guard";
 import { Budget, fetchText, TIME_BUDGET_MS, type Identity } from "./fetcher";
 import { parseRobots, type Robots } from "./robots";
 
@@ -355,6 +356,8 @@ async function followLinks(origin: string, robots: Robots, budget: Budget, mode:
     const parsed = new URL(url);
     if (bareHost(parsed.hostname) !== siteHost) return;
     if (ASSET_EXTENSIONS.test(parsed.pathname)) return;
+    // Affiliate redirect paths are never requested.
+    if (isAffiliatePath(url)) return;
     if (seen.has(url) || !robots.isAllowed(url)) return;
     seen.add(url);
     queue.push(url);
@@ -399,12 +402,17 @@ function readWithFetch(budget: Budget) {
   return (urls: string[]) =>
     Promise.all(
       urls.map(async (url): Promise<PageRead> => {
-        const response = await fetchText(url, budget);
+        const response = await fetchText(url, budget, {
+          allowHost: (host) => sameSite(host, new URL(url).hostname),
+        });
         if (!response.ok) {
           return {
             ok: false,
             detail: response.reason === "timeout" ? "it took longer than 10 seconds to respond" : "the request failed",
           };
+        }
+        if (!sameSite(new URL(response.url).hostname, new URL(url).hostname)) {
+          return { ok: false, detail: `it redirects to another site (${new URL(response.url).hostname})` };
         }
         if (response.botProtection) return { ok: false, detail: "the site's bot protection answered instead" };
         if (response.status >= 400) return { ok: false, detail: `it returned status ${response.status}` };

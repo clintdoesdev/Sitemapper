@@ -332,13 +332,26 @@ export type FetchOutcome = FetchOk | FetchFail;
 export async function fetchText(
   url: string,
   budget: Budget,
-  options: { html?: boolean; maxBytes?: number } = {},
+  options: { html?: boolean; maxBytes?: number; allowHost?: (hostname: string) => boolean } = {},
 ): Promise<FetchOutcome> {
   const response = await fetchPage(url, {
     budget,
     accept: options.html ? "html" : "any",
     maxBytes: options.maxBytes ?? MAX_PAGE_BYTES,
+    allowHost: options.allowHost,
   });
+  // A redirect off the site is recorded as the final URL; its body isn't fetched.
+  if (response.offHostRedirect) {
+    return {
+      ok: true,
+      url: response.offHostRedirect,
+      status: response.status,
+      contentType: "",
+      text: "",
+      retryAfter: null,
+      botProtection: false,
+    };
+  }
   if (response.errorKind) {
     return {
       ok: false,
