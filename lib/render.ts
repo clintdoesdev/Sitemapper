@@ -1,5 +1,6 @@
 import type { Browser, HTTPRequest } from "puppeteer-core";
-import { blockedHostReason, userAgentFor, type Identity } from "./crawl";
+import { userAgentFor, type Identity } from "./fetcher";
+import { checkHost } from "./guard";
 const NAVIGATION_TIMEOUT_MS = 15_000;
 const SETTLE_TIMEOUT_MS = 4_000;
 const SKIPPED_RESOURCES = new Set(["image", "media", "font", "stylesheet"]);
@@ -55,14 +56,14 @@ export async function withBrowser<T>(work: (browser: Browser) => Promise<T>): Pr
   }
 }
 
-function isAllowedRequest(request: HTTPRequest): boolean {
+async function isAllowedRequest(request: HTTPRequest): Promise<boolean> {
   const url = request.url();
   if (url.startsWith("data:") || url.startsWith("blob:")) return true;
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
     // The page's own scripts must not reach private or local addresses either.
-    return !blockedHostReason(parsed.hostname);
+    return (await checkHost(parsed.hostname)) === null;
   } catch {
     return false;
   }
@@ -80,9 +81,9 @@ export async function renderPage(
     await page.setUserAgent(userAgentFor(identity));
     if (identity === "browser") await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
     await page.setRequestInterception(true);
-    page.on("request", (request) => {
+    page.on("request", async (request) => {
       if (request.isInterceptResolutionHandled()) return;
-      if (!isAllowedRequest(request) || SKIPPED_RESOURCES.has(request.resourceType())) {
+      if (SKIPPED_RESOURCES.has(request.resourceType()) || !(await isAllowedRequest(request))) {
         request.abort().catch(() => undefined);
       } else {
         request.continue().catch(() => undefined);
@@ -97,7 +98,7 @@ export async function renderPage(
       .catch(() => undefined);
 
     const finalUrl = page.url();
-    if (blockedHostReason(new URL(finalUrl).hostname)) {
+    if (await checkHost(new URL(finalUrl).hostname)) {
       return { ok: false, error: "Redirected to a private address." };
     }
     const status = response?.status() ?? 200;

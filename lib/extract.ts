@@ -1,14 +1,7 @@
-import {
-  blockedHostReason,
-  Budget,
-  decodeEntities,
-  type Identity,
-  fetchText,
-  looksJavaScriptBuilt,
-  parseRobots,
-  toHttpUrl,
-  type Robots,
-} from "./crawl";
+import { decodeEntities, looksJavaScriptBuilt, toHttpUrl } from "./crawl";
+import { Budget, fetchText, type Identity } from "./fetcher";
+import { blockedHostReason } from "./guard";
+import { parseRobots, type Robots } from "./robots";
 import { renderPage, withBrowser } from "./render";
 
 export const MAX_EXTRACT_URLS = 10;
@@ -238,6 +231,9 @@ async function extractOne(url: string, budget: Budget): Promise<ExtractResult> {
     };
   }
   const { status } = response;
+  if (response.botProtection) {
+    return { url, ok: false, blocked: true, error: `Blocked by bot protection. Open view-source:${url} in a browser to study it manually.` };
+  }
   if (status === 429) {
     return {
       url,

@@ -5,4 +5,5 @@
 
 ## Checks before pushing
 - `npm run test:patterns`
+- `npm run selftest` (offline: DNS and fetch are injected)
 - `npm run build` (must pass with no type errors)

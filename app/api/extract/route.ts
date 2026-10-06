@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { checkOrigin } from "@/lib/request";
 import type { Identity } from "@/lib/crawl";
 import { extractPages, MAX_EXTRACT_URLS, MAX_RENDER_URLS } from "@/lib/extract";
 
@@ -11,6 +12,8 @@ function error(message: string, status: number) {
 }
 
 export async function POST(request: Request) {
+  const rejected = checkOrigin(request);
+  if (rejected) return rejected;
   let urls: string[] = [];
   let render = false;
   let gentle = false;

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { checkOrigin } from "@/lib/request";
 import {
   BlockedHostError,
   CrawlError,
@@ -36,6 +37,8 @@ function commonOrigin(urls: string[], fallback: string): string {
 }
 
 export async function POST(request: Request) {
+  const rejected = checkOrigin(request);
+  if (rejected) return rejected;
   let domain = "";
   let identity: Identity = "bot";
   try {

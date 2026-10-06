@@ -9,11 +9,13 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test:patterns": "node --experimental-strip-types --no-warnings scripts/test-patterns.mts"
+    "test:patterns": "node --experimental-strip-types --no-warnings scripts/test-patterns.mts",
+    "selftest": "npx --yes tsx scripts/selftest.ts"
   },
   "dependencies": {
     "@sparticuz/chromium": "^153.0.0",
     "next": "^15.5.0",
+    "node-html-parser": "^7.1.0",
     "puppeteer-core": "^25.12.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

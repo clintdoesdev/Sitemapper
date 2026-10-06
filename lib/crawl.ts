@@ -1,21 +1,11 @@
-import { gunzipSync } from "node:zlib";
+import { blockedHostReason } from "./guard";
+import { Budget, fetchText, TIME_BUDGET_MS, type Identity } from "./fetcher";
+import { parseRobots, type Robots } from "./robots";
 
-/**
- * How requests identify themselves. "bot" announces Sitemapper; "browser"
- * sends the user agent and headers of a regular desktop Chrome, for sites
- * that refuse anything that looks like a tool.
- */
-export type Identity = "bot" | "browser";
+export { blockedHostReason } from "./guard";
+export { Budget, fetchText, type Identity } from "./fetcher";
+export { parseRobots, type Robots } from "./robots";
 
-export const BOT_USER_AGENT = "SitemapperBot/1.0 (site structure study tool)";
-export const BROWSER_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36";
-
-export function userAgentFor(identity: Identity): string {
-  return identity === "browser" ? BROWSER_USER_AGENT : BOT_USER_AGENT;
-}
-const REQUEST_TIMEOUT_MS = 10_000;
-const TIME_BUDGET_MS = 50_000;
 const MAX_SITEMAPS = 60;
 const MAX_URLS = 50_000;
 const SITEMAP_CONCURRENCY = 4;
@@ -25,7 +15,8 @@ const MAX_CRAWL_PAGES = 300;
 const MAX_RENDER_CRAWL_PAGES = 40;
 const RENDER_CRAWL_CONCURRENCY = 3;
 const MIN_RENDER_BUDGET_MS = 8_000;
-const MAX_BODY_BYTES = 60 * 1024 * 1024;
+/** Sitemaps can hold 50,000 URLs, so they get a bigger cap than pages. */
+const MAX_SITEMAP_BYTES = 60 * 1024 * 1024;
 const DEFAULT_SITEMAP_PATHS = ["/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml", "/wp-sitemap.xml"];
 const ASSET_EXTENSIONS =
   /\.(?:png|jpe?g|gif|webp|avif|svg|ico|bmp|tiff?|css|js|mjs|map|json|xml|gz|txt|pdf|zip|rar|woff2?|ttf|otf|eot|mp3|mp4|m4a|m4v|webm|ogg|ogv|wav|mov|avi|wmv|flv)$/i;
@@ -52,37 +43,6 @@ export class CrawlError extends Error {}
 // Input normalisation and SSRF guard
 // ---------------------------------------------------------------------------
 
-/** Returns an error message if the hostname must not be fetched, otherwise null. */
-export function blockedHostReason(hostname: string): string | null {
-  const host = hostname.toLowerCase().replace(/\.$/, "");
-  if (host.startsWith("[") || host.includes(":")) {
-    return "IP addresses in IPv6 form aren't supported. Enter the site's domain name instead.";
-  }
-  if (host === "localhost" || host.endsWith(".localhost")) {
-    return "Local addresses can't be mapped. Enter a public domain, like example.com.";
-  }
-  if (host.endsWith(".local") || host.endsWith(".internal")) {
-    return "Internal network addresses can't be mapped. Enter a public domain, like example.com.";
-  }
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(host)) {
-    const [a, b] = host.split(".").map(Number);
-    const isPrivate =
-      a === 127 ||
-      a === 10 ||
-      a === 0 ||
-      (a === 169 && b === 254) ||
-      (a === 192 && b === 168) ||
-      (a === 172 && b >= 16 && b <= 31);
-    if (isPrivate) {
-      return "Private and local IP addresses can't be mapped. Enter a public domain, like example.com.";
-    }
-  }
-  if (!host.includes(".")) {
-    return "That domain is missing its ending, like .com or .co.uk. Enter the full domain.";
-  }
-  return null;
-}
-
 /** Turns user input like "example.com/path" into an origin like "https://example.com". */
 export function normalizeDomain(input: string): string {
   const trimmed = input.trim();
@@ -102,188 +62,12 @@ export function normalizeDomain(input: string): string {
   return url.origin;
 }
 
-// ---------------------------------------------------------------------------
-// Fetching
-// ---------------------------------------------------------------------------
-
-type FetchOk = {
-  ok: true;
-  url: string;
-  status: number;
-  contentType: string;
-  text: string;
-  /** Seconds the site asked us to wait, from a Retry-After header. */
-  retryAfter: number | null;
-};
-type FetchFail = { ok: false; reason: "network" | "timeout" | "blocked" };
-export type FetchOutcome = FetchOk | FetchFail;
-
-/** A shared deadline, and identity, for every request made while handling one API call. */
-export class Budget {
-  private readonly deadline: number;
-  readonly identity: Identity;
-
-  constructor(ms: number = TIME_BUDGET_MS, identity: Identity = "bot") {
-    this.deadline = Date.now() + ms;
-    this.identity = identity;
-  }
-
-  remaining(): number {
-    return this.deadline - Date.now();
-  }
-
-  expired(): boolean {
-    return this.remaining() <= 0;
-  }
-}
-
-function parseRetryAfter(value: string | null): number | null {
-  if (!value) return null;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds)) return Math.max(0, seconds);
-  const date = Date.parse(value);
-  return Number.isNaN(date) ? null : Math.max(0, (date - Date.now()) / 1000);
-}
-
-export async function fetchText(
-  url: string,
-  budget: Budget,
-  options: { html?: boolean } = {},
-): Promise<FetchOutcome> {
-  const timeout = Math.min(REQUEST_TIMEOUT_MS, budget.remaining());
-  if (timeout <= 0) return { ok: false, reason: "timeout" };
-  const asBrowser = budget.identity === "browser";
-  const headers: Record<string, string> = {
-    "User-Agent": userAgentFor(budget.identity),
-    Accept:
-      options.html || asBrowser
-        ? "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-        : "*/*",
-    "Accept-Language": asBrowser ? "en-US,en;q=0.9" : "en;q=0.9,*;q=0.5",
-  };
-  if (asBrowser) {
-    headers["Upgrade-Insecure-Requests"] = "1";
-    headers["Sec-Fetch-Dest"] = "document";
-    headers["Sec-Fetch-Mode"] = "navigate";
-    headers["Sec-Fetch-Site"] = "none";
-  }
-  try {
-    const response = await fetch(url, {
-      headers,
-      redirect: "follow",
-      cache: "no-store",
-      signal: AbortSignal.timeout(timeout),
-    });
-    // Redirects are followed, so check where we actually ended up.
-    if (blockedHostReason(new URL(response.url || url).hostname)) {
-      await response.body?.cancel();
-      return { ok: false, reason: "blocked" };
-    }
-    let bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
-      bytes = new Uint8Array(gunzipSync(bytes, { maxOutputLength: MAX_BODY_BYTES }));
-    }
-    return {
-      ok: true,
-      url: response.url || url,
-      status: response.status,
-      contentType: response.headers.get("content-type") ?? "",
-      text: new TextDecoder().decode(bytes),
-      retryAfter: parseRetryAfter(response.headers.get("retry-after")),
-    };
-  } catch (error) {
-    const name = error instanceof Error ? error.name : "";
-    return { ok: false, reason: name === "TimeoutError" || name === "AbortError" ? "timeout" : "network" };
-  }
-}
-
 function plural(count: number, word: string): string {
   return `${count.toLocaleString("en-US")} ${count === 1 ? word : `${word}s`}`;
 }
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// ---------------------------------------------------------------------------
-// robots.txt
-// ---------------------------------------------------------------------------
-
-type RobotsRule = { allow: boolean; length: number; regex: RegExp };
-
-export type Robots = {
-  sitemaps: string[];
-  isAllowed: (url: string) => boolean;
-};
-
-function ruleToRegex(path: string): RegExp {
-  const anchored = path.endsWith("$");
-  const body = anchored ? path.slice(0, -1) : path;
-  const source = body
-    .split("*")
-    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
-    .join(".*");
-  return new RegExp(`^${source}${anchored ? "$" : ""}`);
-}
-
-export function parseRobots(text: string, origin: string): Robots {
-  const sitemaps: string[] = [];
-  const rules: RobotsRule[] = [];
-
-  let groupAgents: string[] = [];
-  let inRules = false;
-
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.replace(/#.*$/, "").trim();
-    const match = /^([a-z-]+)\s*:\s*(.*)$/i.exec(line);
-    if (!match) continue;
-    const field = match[1].toLowerCase();
-    const value = match[2].trim();
-
-    if (field === "sitemap") {
-      try {
-        sitemaps.push(new URL(value, origin).href);
-      } catch {
-        // Ignore malformed sitemap lines.
-      }
-      continue;
-    }
-    if (field === "user-agent") {
-      // A user-agent line after rules starts a new group.
-      if (inRules) {
-        groupAgents = [];
-        inRules = false;
-      }
-      groupAgents.push(value.toLowerCase());
-      continue;
-    }
-    if (field === "allow" || field === "disallow") {
-      inRules = true;
-      if (!groupAgents.includes("*") || !value) continue;
-      rules.push({ allow: field === "allow", length: value.length, regex: ruleToRegex(value) });
-    }
-  }
-
-  const isAllowed = (url: string): boolean => {
-    let path: string;
-    try {
-      const parsed = new URL(url);
-      path = parsed.pathname + parsed.search;
-    } catch {
-      return false;
-    }
-    let best: RobotsRule | null = null;
-    for (const rule of rules) {
-      if (!rule.regex.test(path)) continue;
-      // Longest match wins; on a tie, Allow wins.
-      if (!best || rule.length > best.length || (rule.length === best.length && rule.allow)) {
-        best = rule;
-      }
-    }
-    return best ? best.allow : true;
-  };
-
-  return { sitemaps: [...new Set(sitemaps)], isAllowed };
 }
 
 // ---------------------------------------------------------------------------
@@ -375,7 +159,7 @@ async function readSitemaps(seeds: string[], budget: Budget, state: SitemapState
     const batch = queue.splice(0, Math.min(SITEMAP_CONCURRENCY, MAX_SITEMAPS - tried.size));
     batch.forEach((url) => tried.add(url));
 
-    const responses = await Promise.all(batch.map((url) => fetchText(url, budget)));
+    const responses = await Promise.all(batch.map((url) => fetchText(url, budget, { maxBytes: MAX_SITEMAP_BYTES })));
     responses.forEach((response, index) => {
       if (!response.ok || response.status >= 400) return;
       const { text } = response;
@@ -530,6 +314,7 @@ function readWithFetch(budget: Budget) {
             detail: response.reason === "timeout" ? "it took longer than 10 seconds to respond" : "the request failed",
           };
         }
+        if (response.botProtection) return { ok: false, detail: "the site's bot protection answered instead" };
         if (response.status >= 400) return { ok: false, detail: `it returned status ${response.status}` };
         if (!/text\/html|application\/xhtml\+xml/i.test(response.contentType)) {
           return { ok: false, detail: "it didn't return an HTML page" };
