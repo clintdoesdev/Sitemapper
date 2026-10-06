@@ -12,6 +12,11 @@ import { Budget } from "../lib/fetcher";
 import { wordpressPrediction, nextAppRouterPage, clientRenderedShell, cloudflareChallenge } from "./fixtures";
 import { POST as analyseRoute } from "../app/api/analyse/route";
 import { POST as siteRoute } from "../app/api/site/route";
+import { aggregatePattern, buildTemplate, contentEngine, pickSamples, sentenceSkeleton, architectureTree } from "../lib/aggregate";
+import { findIssues } from "../lib/issues";
+import { buildReport } from "../lib/report";
+import type { AnalysisState, PatternResult } from "../lib/analysis-types";
+import type { PageAnalysis } from "../lib/extract/types";
 
 type Test = { name: string; run: () => void | Promise<void> };
 const tests: Test[] = [];
@@ -483,6 +488,154 @@ test("routes: URLs off the mapped host get a 400; foreign Origin headers get a 4
   assert.equal(ok.status, 200);
   const json = (await ok.json()) as { pages: { outcome: string }[] };
   assert.equal(json.pages[0].outcome, "ok");
+});
+
+// ---------------------------------------------------------------------------
+// Aggregation, issues and report
+// ---------------------------------------------------------------------------
+
+test("templates: dates become {date}, differing runs become {x} or {n}", () => {
+  assert.equal(
+    buildTemplate([
+      "Arsenal vs Chelsea Prediction, Tips & Odds – 12 Oct 2026",
+      "Lyon vs PSG Prediction, Tips & Odds – 13 Oct 2026",
+    ]).template,
+    "{x} vs {x} Prediction, Tips & Odds – {date}",
+  );
+  assert.equal(buildTemplate(["Page 2 of 9 | Blog", "Page 3 of 9 | Blog"]).template, "Page {n} of 9 | Blog");
+  const single = buildTemplate(["Results for October 12, 2026 and 2026-10-13"]);
+  assert.equal(single.template, "Results for {date} and {date}");
+  assert.equal(single.needsMoreSamples, true);
+});
+
+test("content engine: skeletons, boilerplate and uniqueness on two fixture pages", () => {
+  const url = (slug: string) => `https://tips.example/predictions/${slug}/`;
+  const a = analyseHtml(wordpressPrediction("Arsenal", "Chelsea", 12), { url: url("arsenal-vs-chelsea") });
+  const b = analyseHtml(wordpressPrediction("Lyon", "PSG", 13), { url: url("lyon-vs-psg") });
+  assert.equal(sentenceSkeleton("Arsenal host Chelsea on 12 Oct 2026 with kick-off at 19:00 WAT."), "{name} host {name} on {date} with kick-off at {n} {name}.");
+  assert.equal(sentenceSkeleton("The match starts at 19:00."), "The match starts at {n}.", "common openers stay literal");
+  const engine = contentEngine([a.structure.sentences, b.structure.sentences]);
+  assert.ok(engine.templated.some((t) => t.skeleton.startsWith("{name} host {name} on {date}")), JSON.stringify(engine.templated));
+  assert.ok(engine.boilerplate.includes("This preview is written by the editorial team and checked before every match day so the tips stay accurate and fair."));
+  assert.ok(engine.uniqueness !== null && engine.uniqueness > 0.1 && engine.uniqueness < 0.9, String(engine.uniqueness));
+  assert.equal(contentEngine([a.structure.sentences]).uniqueness, null, "one sample has no uniqueness");
+  const identical = contentEngine([a.structure.sentences, a.structure.sentences]);
+  assert.equal(identical.uniqueness, 0);
+});
+
+test("sampling takes the start, middle and end of a group, on the mapped host only", () => {
+  const urls = Array.from({ length: 9 }, (_, i) => `https://tips.example/p/${i}`);
+  assert.deepEqual(pickSamples(urls, 3, "tips.example"), ["https://tips.example/p/0", "https://tips.example/p/4", "https://tips.example/p/8"]);
+  assert.deepEqual(pickSamples(urls, 2, "www.tips.example"), ["https://tips.example/p/0", "https://tips.example/p/8"]);
+  assert.deepEqual(pickSamples(["https://cdn.other.example/x", "https://tips.example/a"], 3, "tips.example"), ["https://tips.example/a"]);
+  const tree = architectureTree([{ pattern: "/league/*/table", count: 8 }, { pattern: "/league/*/results", count: 8 }, { pattern: "/", count: 1 }]);
+  assert.equal(tree.children[0].segment, "league");
+  assert.equal(tree.children[0].count, 16);
+});
+
+function page(url: string, pattern: string, html: string | null, extra: Partial<PageAnalysis> = {}): PageAnalysis {
+  return {
+    url,
+    pattern,
+    finalUrl: url,
+    status: html ? 200 : 500,
+    outcome: html ? "ok" : "error",
+    message: html ? null : "The page returned status 500.",
+    redirectChain: [],
+    offHostRedirect: null,
+    ms: 120,
+    bytes: html?.length ?? 0,
+    truncated: false,
+    headers: {},
+    data: html ? analyseHtml(html, { url, patterns: ["/", "/predictions/*", "/thin/*", "/misc/*", "/orphan/*"] }) : null,
+    ...extra,
+  };
+}
+
+function result(pattern: string, pages: PageAnalysis[], count = 10): PatternResult {
+  return { pattern, count, pages, aggregate: aggregatePattern(pattern, pages), trimmed: [] };
+}
+
+async function fixtureState(): Promise<AnalysisState> {
+  resetNetwork(tipsSite());
+  const site = await checkSite({ origin: "https://tips.example", patterns: PATTERNS, sampleUrl: "https://tips.example/predictions/arsenal-vs-chelsea/" });
+  site.host.notFound = { ...site.host.notFound, kind: "soft 404", status: 200, note: "A made-up URL returns 200 (soft 404)." };
+  site.host.canonicalHost = { ...site.host.canonicalHost, winner: "both serve pages" };
+  const thinHtml = (n: number) =>
+    `<html><head><title>Thin ${n}</title><meta name="description" content="d"><link rel="canonical" href="https://tips.example/thin/${n}"></head><body><main><h1>Thin</h1><p>This short page repeats the same words as every other page in this pattern.</p></main></body></html>`;
+  const misc = (title: string, head: string, body: string) => `<html><head><title>${title}</title>${head}</head><body><main>${body}</main></body></html>`;
+  const longText = "x".repeat(70);
+  return {
+    map: {
+      origin: "https://tips.example",
+      host: "tips.example",
+      source: "sitemap",
+      total: 100,
+      sitemaps: ["https://tips.example/sitemap.xml"],
+      sitemapStats: [{ url: "https://tips.example/sitemap.xml", kind: "urlset", urls: 100, withLastmod: 100, oldestLastmod: null, newestLastmod: null, distinctLastmod: 1, extensions: { image: false, video: false, news: false, hreflang: false }, autoLastmod: true }],
+      truncated: false,
+      notes: [],
+      groups: ["/predictions/*", "/thin/*", "/misc/*", "/orphan/*", "/"].map((pattern) => ({ pattern, count: 10, share: 10, lastmodNewest: null, lastmodOldest: null, lastmodCoverage: 0, placeholders: [] })),
+    },
+    site,
+    pagesPerPattern: 2,
+    generatedAt: "2026-10-06T12:00:00.000Z",
+    patterns: [
+      result("/predictions/*", [
+        page("https://tips.example/predictions/arsenal-vs-chelsea/", "/predictions/*", wordpressPrediction("Arsenal", "Chelsea", 12), {
+          redirectChain: [
+            { url: "a", status: 301, location: "b" },
+            { url: "b", status: 301, location: "c" },
+          ],
+        }),
+        page("https://tips.example/predictions/lyon-vs-psg/", "/predictions/*", wordpressPrediction("Lyon", "PSG", 13)),
+        page("https://tips.example/predictions/broken/", "/predictions/*", null),
+        { ...page("https://tips.example/predictions/cf/", "/predictions/*", null), outcome: "blocked", status: 403, message: "Blocked by bot protection. Open view-source:https://tips.example/predictions/cf/ in a browser to study it manually." },
+      ]),
+      result("/thin/*", [page("https://tips.example/thin/1", "/thin/*", thinHtml(1)), page("https://tips.example/thin/2", "/thin/*", thinHtml(1))]),
+      result("/misc/*", [
+        page("https://tips.example/misc/1", "/misc/*", misc("", "", "<p>No title, no description, no H1, no canonical.</p>")),
+        page("https://tips.example/misc/2", "/misc/*", misc(`A title that is far too long for search results ${longText}`, `<meta name="description" content="${"d".repeat(170)}"><meta name="robots" content="noindex"><link rel="canonical" href="https://tips.example/other">`, "<h1>One</h1><h1>Two</h1>")),
+        page("https://tips.example/misc/3", "/misc/*", clientRenderedShell()),
+      ]),
+    ],
+  };
+}
+
+test("issues: every rule fires on fixture data built to trigger it; blocked pages are separate", async () => {
+  const state = await fixtureState();
+  const { issues, blocked } = findIssues(state);
+  const ids = new Set(issues.map((item) => item.id));
+  const expected = [
+    "http-errors", "missing-title", "duplicate-titles", "long-titles", "missing-description", "long-descriptions",
+    "missing-h1", "multiple-h1", "canonical-missing", "canonical-elsewhere", "noindex-in-sitemap", "invalid-jsonld",
+    "faq-not-visible", "client-rendered", "thin-pages", "images-missing-alt", "images-missing-dimensions",
+    "mixed-content", "redirect-chains", "soft-404", "host-handling", "lastmod-auto", "links-not-in-sitemap",
+    "internal-nofollow", "unlinked-patterns",
+  ];
+  for (const id of expected) assert.ok(ids.has(id), `rule ${id} should fire`);
+  assert.deepEqual(blocked.map((item) => item.url), ["https://tips.example/predictions/cf/"]);
+  assert.ok(!issues.some((item) => item.examples.includes("https://tips.example/predictions/cf/")), "blocked pages aren't site issues");
+  const order = issues.map((item) => item.severity);
+  assert.deepEqual(order, [...order].sort((a, b) => ["high", "medium", "low"].indexOf(a) - ["high", "medium", "low"].indexOf(b)));
+  assert.ok(issues.find((item) => item.id === "unlinked-patterns")?.patterns.includes("/orphan/*"));
+  for (const item of issues) assert.ok(item.examples.length <= 3);
+});
+
+test("report: sections in order, every sampled URL as a full link", async () => {
+  const state = await fixtureState();
+  const report = buildReport(state);
+  if (process.env.PRINT_REPORT) console.log(report);
+  const headings = report.split("\n").filter((line) => line.startsWith("## "));
+  assert.deepEqual(headings, [
+    "## Summary", "## Site files", "## Host behaviour", "## Stack and third parties", "## Patterns",
+    "## Pattern details", "## Link map", "## Linked but not in the sitemap", "## Issues", "## Method and limits",
+  ]);
+  for (const result of state.patterns) {
+    for (const sampled of result.pages) assert.ok(report.includes(`[${sampled.url}](${sampled.url})`), `${sampled.url} should be linked`);
+  }
+  assert.ok(report.includes("| pattern | pages | share | sampled | title template | schema types | avg words | uniqueness | issues |"));
+  assert.ok(report.includes("{x} vs {x} Prediction, Tips & Odds – {date}"));
 });
 
 // ---------------------------------------------------------------------------
