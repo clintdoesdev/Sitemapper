@@ -61,7 +61,7 @@ The "Send requests as a regular browser" setting is under **Advanced options** b
 Some sites send almost empty HTML and build their pages in the browser with JavaScript. Sitemapper notices this and loads those pages in a headless Chromium browser so the scripts can run:
 
 - **Mapping.** When there's no sitemap and the homepage is a JavaScript shell (fewer than 80 words of text but loads scripts), or it refuses a plain request, the link crawl runs again in the browser. Browser crawls cover up to 40 pages, 3 at a time, within the same 50-second budget.
-- **Extracting contents.** Every page is read as plain HTML first, which is fast. Pages that turn out to be JavaScript shells get a second read in the browser, 4 pages per request with 2 requests at a time. Each page shows whether it was read from the raw HTML or after running JavaScript, and the CSV has a `read_from` column.
+- **Read every page.** Every page is read as plain HTML first, which is fast. Pages that turn out to be JavaScript shells get a second read in the browser, 4 pages per request with 2 requests at a time. Each page shows whether it was read from the raw HTML or after running JavaScript, and the CSV has a `read_from` column.
 
 In the browser, images, fonts, media and stylesheets are skipped to save time, and every request the page makes is checked, so a site's scripts can't reach private or local addresses. robots.txt is still respected.
 
@@ -75,7 +75,7 @@ This uses two extra dependencies, [`puppeteer-core`](https://pptr.dev) and [`@sp
 | URLs collected | 50,000 |
 | Pages crawled (when there's no sitemap) | 300, 4 at a time with a 300 ms pause between batches |
 | Time per domain | 50 seconds in total, 10 seconds per request |
-| Content extraction | 5,000 pages per run (run again to continue), 10 per request with 2 requests at a time, robots.txt respected |
+| Read every page | 5,000 pages per run (run again to continue), 20 per request, 3 requests at a time, each reading 6 pages at once as soon as a slot frees up; robots.txt read once per run and respected |
 | Browser rendering | 4 pages per request, 2 tabs at a time, 15 seconds per page |
 | Analysis | Up to 3 pages per pattern, the largest 20 patterns plus the homepage |
 | Page size | Pages stop being read at 3 MB and are marked truncated |

@@ -64,10 +64,10 @@ type RunState = {
 };
 /** Most pages one extraction run covers; running again continues with the rest. */
 const MAX_EXTRACT_PAGES = 5_000;
-const EXTRACT_CHUNK = 10;
+const EXTRACT_CHUNK = 20;
 const RENDER_CHUNK = 4;
 /** Requests in flight at once, for plain reads and for browser renders. */
-const EXTRACT_WORKERS = 2;
+const EXTRACT_WORKERS = 3;
 /** Temporary failures are retried this many times, more slowly each round. */
 const RETRY_DELAYS_MS = [5_000, 15_000, 30_000];
 const RETRY_CHUNK = 5;
@@ -326,6 +326,8 @@ export default function Home() {
     // When a site answers 429, every request waits until this time.
     let pauseUntil = 0;
     const latest = new Map<string, ExtractResult>();
+    // robots.txt per origin, read once by the server and sent back with every later request.
+    const robotsTxt: Record<string, string> = {};
 
     const post = async (chunk: string[], options: { render?: boolean; gentle?: boolean } = {}) => {
       const delay = pauseUntil - Date.now();
@@ -333,15 +335,16 @@ export default function Home() {
       const response = await fetch("/api/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls: chunk, identity, ...options }),
+        body: JSON.stringify({ urls: chunk, identity, robotsTxt, ...options }),
         signal,
       });
-      let data: { pages?: ExtractResult[]; error?: string } | null = null;
+      let data: { pages?: ExtractResult[]; robotsTxt?: Record<string, string>; error?: string } | null = null;
       try {
         data = await response.json();
       } catch {
         data = null;
       }
+      if (data?.robotsTxt) Object.assign(robotsTxt, data.robotsTxt);
       if (!response.ok || !data?.pages) {
         throw new ServerError(
           data?.error ??
@@ -788,7 +791,7 @@ export default function Home() {
                       {extracting ? "Reading…" : "Read every page"}
                     </button>
                     <p className="text-sm leading-relaxed text-muted">
-                      Adds each page&apos;s title, headings and text to the page list download. Slower: a few minutes per thousand pages.
+                      Adds each page&apos;s title, headings and text to the page list download.
                       {isFiltering && " Only the pages matching your filter are read."}
                     </p>
                   </div>

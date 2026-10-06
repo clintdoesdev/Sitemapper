@@ -6,6 +6,7 @@ import { fetchPage, fetcherConfig } from "../lib/fetcher";
 import { parseRobots, aiBotAccess } from "../lib/robots";
 import { groupByPattern, groupUrls, matchPattern, classifySegment, textTemplate } from "../lib/patterns";
 import { mapSite, parseSitemap, sitemapStat } from "../lib/crawl";
+import { extractPages } from "../lib/contents";
 import { analyseHtml, analyseUrls } from "../lib/extract";
 import { checkSite } from "../lib/site";
 import { Budget } from "../lib/fetcher";
@@ -325,6 +326,38 @@ test("analysis: affiliate paths are recorded, not requested", async () => {
   });
   assert.equal(pages[0].outcome, "affiliate");
   assert.equal(requested.length, 0);
+});
+
+test("read every page: a slow page doesn't hold up the others; robots.txt is read once per run", async () => {
+  resetNetwork();
+  const html = "<html><head><title>T</title></head><body><main><p>Some words here.</p></main></body></html>";
+  const shared = fetcherConfig.fetch;
+  const fetched: string[] = [];
+  fetcherConfig.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    fetched.push(url);
+    if (url.endsWith("/robots.txt")) return new Response("User-agent: *\nDisallow: /private", { headers: { "content-type": "text/plain" } });
+    await new Promise((r) => setTimeout(r, url.endsWith("/slow") ? 1500 : 150));
+    return new Response(html, { headers: { "content-type": "text/html" } });
+  }) as typeof fetch;
+  try {
+    const urls = ["https://example.com/slow", ...Array.from({ length: 19 }, (_, i) => `https://example.com/p${i}`)];
+    const robotsOut: Record<string, string> = {};
+    const started = Date.now();
+    const pages = await extractPages(urls, { robotsOut });
+    const elapsed = Date.now() - started;
+    assert.equal(pages.filter((page) => page.ok).length, 20);
+    // 19 fast pages across 5 free workers take ~600ms, running alongside the slow one.
+    assert.ok(elapsed < 2200, `took ${elapsed}ms`);
+    assert.equal(robotsOut["https://example.com"], "User-agent: *\nDisallow: /private");
+
+    fetched.length = 0;
+    const again = await extractPages(["https://example.com/p1", "https://example.com/private/x"], { robotsTxt: robotsOut });
+    assert.ok(!fetched.some((url) => url.endsWith("/robots.txt")), "known robots.txt isn't fetched again");
+    assert.equal(again[1].ok, false, "rules from the passed robots.txt still apply");
+  } finally {
+    fetcherConfig.fetch = shared;
+  }
 });
 
 // ---------------------------------------------------------------------------

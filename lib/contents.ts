@@ -5,9 +5,10 @@ import { parseRobots, type Robots } from "./robots";
 import { isAffiliatePath } from "./affiliate";
 import { renderPage, withBrowser } from "./render";
 
-export const MAX_EXTRACT_URLS = 10;
+export const MAX_EXTRACT_URLS = 20;
 export const MAX_RENDER_URLS = 4;
-const EXTRACT_CONCURRENCY = 4;
+/** Pages fetched at once per request; a worker pool, so one slow page doesn't hold up the rest. */
+const EXTRACT_CONCURRENCY = 6;
 const RENDER_CONCURRENCY = 2;
 const GENTLE_PAUSE_MS = 700;
 const EXTRACT_BUDGET_MS = 45_000;
@@ -210,11 +211,13 @@ export function extractContents(
 // Fetching
 // ---------------------------------------------------------------------------
 
-async function loadRobots(origin: string, budget: Budget): Promise<Robots> {
+const MAX_ROBOTS_TEXT = 100_000;
+
+async function loadRobotsText(origin: string, budget: Budget): Promise<string> {
   const response = await fetchText(`${origin}/robots.txt`, budget);
   const text =
     response.ok && response.status < 400 && !/text\/html/i.test(response.contentType) ? response.text : "";
-  return parseRobots(text, origin);
+  return text.slice(0, MAX_ROBOTS_TEXT);
 }
 
 async function extractOne(url: string, budget: Budget): Promise<ExtractResult> {
@@ -304,7 +307,15 @@ function validate(urls: string[], results: ExtractResult[]): Target[] {
  */
 export async function extractPages(
   urls: string[],
-  options: { render?: boolean; gentle?: boolean; identity?: Identity } = {},
+  options: {
+    render?: boolean;
+    gentle?: boolean;
+    identity?: Identity;
+    /** robots.txt text per origin, from an earlier request in the same run. Saves refetching it. */
+    robotsTxt?: Readonly<Record<string, string>>;
+    /** Filled with the robots.txt text of origins this call had to fetch, for the next request. */
+    robotsOut?: Record<string, string>;
+  } = {},
 ): Promise<ExtractResult[]> {
   const budget = new Budget(EXTRACT_BUDGET_MS, options.identity);
   const results: ExtractResult[] = new Array(urls.length);
@@ -312,7 +323,14 @@ export async function extractPages(
   const robotsFor = (origin: string) => {
     let robots = robotsByOrigin.get(origin);
     if (!robots) {
-      robots = loadRobots(origin, budget);
+      const known = options.robotsTxt?.[origin];
+      robots =
+        typeof known === "string"
+          ? Promise.resolve(parseRobots(known, origin))
+          : loadRobotsText(origin, budget).then((text) => {
+              if (options.robotsOut) options.robotsOut[origin] = text;
+              return parseRobots(text, origin);
+            });
       robotsByOrigin.set(origin, robots);
     }
     return robots;
@@ -322,23 +340,35 @@ export async function extractPages(
   const concurrency = options.gentle ? 1 : options.render ? RENDER_CONCURRENCY : EXTRACT_CONCURRENCY;
   const pauseMs = options.gentle ? GENTLE_PAUSE_MS : 0;
 
-  const run = async (read: (target: Target) => Promise<ExtractResult>) => {
-    for (let start = 0; start < valid.length; start += concurrency) {
-      await Promise.all(
-        valid.slice(start, start + concurrency).map(async (target) => {
-          if (budget.remaining() < (options.render ? 3_000 : 0)) {
-            results[target.index] = { url: urls[target.index], ok: false, error: "Ran out of time. Try again." };
-            return;
-          }
-          if (!(await robotsFor(target.origin)).isAllowed(target.url)) {
-            results[target.index] = { url: urls[target.index], ok: false, error: "Blocked by the site's robots.txt." };
-            return;
-          }
-          results[target.index] = { ...(await read(target)), url: urls[target.index] };
-        }),
-      );
-      if (pauseMs > 0 && start + concurrency < valid.length) await new Promise((r) => setTimeout(r, pauseMs));
+  const handle = async (target: Target, read: (target: Target) => Promise<ExtractResult>) => {
+    if (budget.remaining() < (options.render ? 3_000 : 1_000)) {
+      // Not lost: the browser retries these at the end of the run.
+      results[target.index] = { url: urls[target.index], ok: false, retryable: true, error: "Ran out of time. Try again." };
+      return;
     }
+    if (!(await robotsFor(target.origin)).isAllowed(target.url)) {
+      results[target.index] = { url: urls[target.index], ok: false, error: "Blocked by the site's robots.txt." };
+      return;
+    }
+    results[target.index] = { ...(await read(target)), url: urls[target.index] };
+  };
+
+  const run = async (read: (target: Target) => Promise<ExtractResult>) => {
+    if (pauseMs > 0) {
+      // Gentle mode: one page at a time with a pause between pages.
+      for (const [position, target] of valid.entries()) {
+        await handle(target, read);
+        if (position < valid.length - 1) await new Promise((r) => setTimeout(r, pauseMs));
+      }
+      return;
+    }
+    // Worker pool: each worker takes the next page as soon as it finishes one.
+    let next = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, valid.length) }, async () => {
+        while (next < valid.length) await handle(valid[next++], read);
+      }),
+    );
   };
 
   if (!options.render) {

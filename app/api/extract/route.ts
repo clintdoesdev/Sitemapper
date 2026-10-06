@@ -18,6 +18,7 @@ export async function POST(request: Request) {
   let render = false;
   let gentle = false;
   let identity: Identity = "bot";
+  let robotsTxt: Record<string, string> | undefined;
   try {
     const body: unknown = await request.json();
     if (body && typeof body === "object" && "urls" in body && Array.isArray(body.urls)) {
@@ -26,6 +27,14 @@ export async function POST(request: Request) {
     if (body && typeof body === "object" && "render" in body) render = body.render === true;
     if (body && typeof body === "object" && "gentle" in body) gentle = body.gentle === true;
     if (body && typeof body === "object" && "identity" in body && body.identity === "browser") identity = "browser";
+    if (body && typeof body === "object" && "robotsTxt" in body && body.robotsTxt && typeof body.robotsTxt === "object") {
+      robotsTxt = Object.fromEntries(
+        Object.entries(body.robotsTxt as Record<string, unknown>)
+          .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+          .slice(0, 10)
+          .map(([origin, text]) => [origin, text.slice(0, 100_000)]),
+      );
+    }
   } catch {
     // Treated as an empty list below.
   }
@@ -36,7 +45,9 @@ export async function POST(request: Request) {
   }
 
   try {
-    return NextResponse.json({ pages: await extractPages(urls, { render, gentle, identity }) });
+    const robotsOut: Record<string, string> = {};
+    const pages = await extractPages(urls, { render, gentle, identity, robotsTxt, robotsOut });
+    return NextResponse.json({ pages, robotsTxt: robotsOut });
   } catch (err) {
     console.error(err);
     const detail = err instanceof Error && err.message ? ` (${err.message})` : "";

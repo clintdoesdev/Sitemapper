@@ -256,16 +256,16 @@ export function ExtractionStatus({ job, onStop }: { job: ExtractionJob; onStop: 
             : running && job.retrying
               ? `Trying ${plural(job.retrying.total, "page")} again more slowly, because the site rate-limited or failed to answer (round ${job.retrying.round} of 3, ${formatNumber(job.retrying.done)} done).`
               : running
-                ? `Extracting contents of ${formatNumber(job.done)} of ${plural(job.total, "page")}.`
+                ? `Read ${formatNumber(job.done)} of ${plural(job.total, "page")}.`
                 : job.state === "stopped"
-                  ? `Stopped after ${plural(job.done, "page")}. Extract contents again to continue where it stopped.`
+                  ? `Stopped after ${plural(job.done, "page")}. Press Read every page again to continue where it stopped.`
                   : job.state === "failed"
                     ? `Stopped after ${plural(job.done, "page")}.`
-                    : `Extracted contents of ${plural(read, "page")}. Download CSV now includes them.`}
+                    : `Read ${plural(read, "page")}. Download page list now includes them.`}
           {!running &&
             job.state === "done" &&
             job.failed > 0 &&
-            ` ${formatNumber(job.failed)} couldn't be read; the status column in the CSV says why. Extract contents again to retry them.`}
+            ` ${formatNumber(job.failed)} couldn't be read; the status column in the page list says why. Press Read every page again to retry them.`}
           {job.skipped > 0 &&
             ` ${formatNumber(job.skipped)} more matching ${job.skipped === 1 ? "page was" : "pages were"} left out, because one run covers ${formatNumber(job.total)} pages. Run it again to continue.`}
         </p>
