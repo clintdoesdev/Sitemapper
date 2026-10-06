@@ -38,12 +38,62 @@ function plural(count: number, word: string): string {
   return `${count} ${count === 1 ? word : `${word}s`}`;
 }
 
+type PageContext = { source: "sitemap" | "crawl"; uniqueness: number | null };
+type PageRule = {
+  id: string;
+  severity: Severity;
+  title: string;
+  explanation: string;
+  test: (page: Analysed, context: PageContext) => boolean;
+};
+
+/** Rules that look at one analysed page. Used for the issue list and the page-data CSV. */
+const PAGE_RULES: PageRule[] = [
+  { id: "missing-title", severity: "high", title: "Missing title", explanation: "Pages without a <title> rarely rank and show a generated title in results.", test: (p) => !p.data.head.title },
+  { id: "long-titles", severity: "low", title: "Titles over 60 characters", explanation: "Long titles are usually cut off in search results.", test: (p) => p.data.head.titleLength > 60 },
+  { id: "missing-description", severity: "medium", title: "Missing meta description", explanation: "Without one, search engines pick a snippet from the page text.", test: (p) => !p.data.head.description },
+  { id: "long-descriptions", severity: "low", title: "Meta descriptions over 160 characters", explanation: "Long descriptions are usually cut off in search results.", test: (p) => p.data.head.descriptionLength > 160 },
+  { id: "missing-h1", severity: "medium", title: "Missing H1", explanation: "The page has no main heading.", test: (p) => p.data.structure.h1Count === 0 },
+  { id: "multiple-h1", severity: "low", title: "More than one H1", explanation: "Several H1s blur what the page is about.", test: (p) => p.data.structure.h1Count > 1 },
+  { id: "canonical-missing", severity: "medium", title: "Canonical missing", explanation: "Without a canonical, duplicate URL variants (parameters, slashes) can be indexed separately.", test: (p) => p.data.head.canonical.kind === "missing" },
+  { id: "canonical-elsewhere", severity: "medium", title: "Canonical points to another URL", explanation: "The page tells search engines a different URL is the main version, so this one may not be indexed.", test: (p) => p.data.head.canonical.kind === "other" },
+  {
+    id: "noindex-in-sitemap",
+    severity: "high",
+    title: "Noindex pages listed in the sitemap",
+    explanation: "The sitemap asks for these pages to be crawled while the pages ask not to be indexed.",
+    test: (p, c) => c.source === "sitemap" && /noindex/i.test(`${p.data.head.robots} ${p.data.head.googlebot} ${p.data.head.xRobotsTag}`),
+  },
+  { id: "invalid-jsonld", severity: "medium", title: "Invalid JSON-LD", explanation: "At least one structured-data block doesn't parse, so search engines ignore it.", test: (p) => p.data.schema.blocks.some((block) => !block.valid) },
+  { id: "faq-not-visible", severity: "medium", title: "FAQ schema questions not visible", explanation: "FAQ structured data should match questions shown on the page; hidden ones can be treated as spam.", test: (p) => p.data.schema.faq.notVisible.length > 0 },
+  { id: "client-rendered", severity: "high", title: "Mostly client-rendered", explanation: "The HTML has almost no main content; crawlers that don't run JavaScript see an empty page.", test: (p) => p.data.tech.rendering === "mostly client-rendered" },
+  {
+    id: "thin-pages",
+    severity: "medium",
+    title: "Thin, templated pages",
+    explanation: "Under 250 words with less than 30% unique text across samples: pages that mostly repeat each other.",
+    test: (p, c) => c.uniqueness !== null && c.uniqueness < 0.3 && p.data.structure.main.words < 250,
+  },
+  { id: "images-missing-alt", severity: "low", title: "Images missing alt text", explanation: "Images without an alt attribute are invisible to screen readers and image search.", test: (p) => p.data.structure.images.missingAlt > 0 },
+  { id: "images-missing-dimensions", severity: "low", title: "Images missing width or height", explanation: "Images without dimensions shift the layout as they load.", test: (p) => p.data.structure.images.missingDimensions > 0 },
+  { id: "mixed-content", severity: "medium", title: "http resources on https pages", explanation: "Browsers block or warn about insecure resources on secure pages.", test: (p) => p.data.perf.mixedContent.length > 0 },
+  { id: "internal-nofollow", severity: "low", title: "Nofollow on internal links", explanation: "Nofollow on your own links stops link value flowing to your own pages.", test: (p) => p.data.links.internalNofollow > 0 },
+];
+
+/** Issue titles that apply to one sampled page, for the page-data CSV. */
+export function pageIssueTitles(page: PageAnalysis, context: PageContext): string[] {
+  if (page.outcome === "blocked") return [];
+  if (page.outcome === "error" && page.status >= 400) return ["Sampled pages return errors"];
+  if (!page.data) return [];
+  const titles = PAGE_RULES.filter((rule) => rule.test(page as Analysed, context)).map((rule) => rule.title);
+  if (page.redirectChain.length > 1) titles.push("Redirect chains longer than one hop");
+  return titles;
+}
+
 export function findIssues(state: AnalysisState): { issues: Issue[]; blocked: BlockedPage[] } {
   const all: PageAnalysis[] = state.patterns.flatMap((result) => result.pages);
   if (state.site?.homepage) all.push(state.site.homepage);
   const analysed = all.filter((page): page is Analysed => page.data !== null);
-  const hits = (test: (page: Analysed) => boolean) =>
-    analysed.filter(test).map((page) => ({ pattern: page.pattern, url: page.url }));
   const out: (Issue | null)[] = [];
 
   // Bot protection is reported separately; it says nothing about the site's SEO.
@@ -62,8 +112,16 @@ export function findIssues(state: AnalysisState): { issues: Issue[]; blocked: Bl
     ),
   );
 
-  // Titles and descriptions.
-  out.push(issue("missing-title", "high", "Missing title", "Pages without a <title> rarely rank and show a generated title in results.", hits((p) => !p.data.head.title)));
+  // Per-page rules (titles, descriptions, headings, canonicals, schema, rendering, thin content, images).
+  const uniquenessByPattern = new Map(state.patterns.map((result) => [result.pattern, result.aggregate.content.uniqueness]));
+  for (const rule of PAGE_RULES) {
+    const matched = analysed.filter((page) =>
+      rule.test(page, { source: state.map.source, uniqueness: uniquenessByPattern.get(page.pattern) ?? null }),
+    );
+    out.push(issue(rule.id, rule.severity, rule.title, rule.explanation, matched.map((page) => ({ pattern: page.pattern, url: page.url }))));
+  }
+
+  // Duplicate titles across every sampled page.
   const titles = new Map<string, Hit[]>();
   for (const page of analysed) {
     const title = page.data.head.title.trim().toLowerCase();
@@ -72,42 +130,8 @@ export function findIssues(state: AnalysisState): { issues: Issue[]; blocked: Bl
   }
   const duplicates = [...titles.values()].filter((list) => new Set(list.map((hit) => hit.url)).size > 1).flat();
   out.push(issue("duplicate-titles", "medium", "Duplicate titles", "Different sampled pages share the exact same title, which makes them compete for the same queries.", duplicates));
-  out.push(issue("long-titles", "low", "Titles over 60 characters", "Long titles are usually cut off in search results.", hits((p) => p.data.head.titleLength > 60)));
-  out.push(issue("missing-description", "medium", "Missing meta description", "Without one, search engines pick a snippet from the page text.", hits((p) => !p.data.head.description)));
-  out.push(issue("long-descriptions", "low", "Meta descriptions over 160 characters", "Long descriptions are usually cut off in search results.", hits((p) => p.data.head.descriptionLength > 160)));
-
-  // Headings.
-  out.push(issue("missing-h1", "medium", "Missing H1", "The page has no main heading.", hits((p) => p.data.structure.h1Count === 0)));
-  out.push(issue("multiple-h1", "low", "More than one H1", "Several H1s blur what the page is about.", hits((p) => p.data.structure.h1Count > 1)));
-
-  // Canonicals and indexing.
-  out.push(issue("canonical-missing", "medium", "Canonical missing", "Without a canonical, duplicate URL variants (parameters, slashes) can be indexed separately.", hits((p) => p.data.head.canonical.kind === "missing")));
-  out.push(issue("canonical-elsewhere", "medium", "Canonical points to another URL", "The page tells search engines a different URL is the main version, so this one may not be indexed.", hits((p) => p.data.head.canonical.kind === "other")));
-  if (state.map.source === "sitemap") {
-    const noindex = (p: Analysed) => /noindex/i.test(`${p.data.head.robots} ${p.data.head.googlebot} ${p.data.head.xRobotsTag}`);
-    out.push(issue("noindex-in-sitemap", "high", "Noindex pages listed in the sitemap", "The sitemap asks for these pages to be crawled while the pages ask not to be indexed.", hits(noindex)));
-  }
-
-  // Structured data.
-  out.push(issue("invalid-jsonld", "medium", "Invalid JSON-LD", "At least one structured-data block doesn't parse, so search engines ignore it.", hits((p) => p.data.schema.blocks.some((block) => !block.valid))));
-  out.push(issue("faq-not-visible", "medium", "FAQ schema questions not visible", "FAQ structured data should match questions shown on the page; hidden ones can be treated as spam.", hits((p) => p.data.schema.faq.notVisible.length > 0)));
-
-  // Rendering and content.
-  out.push(issue("client-rendered", "high", "Mostly client-rendered", "The HTML has almost no main content; crawlers that don't run JavaScript see an empty page.", hits((p) => p.data.tech.rendering === "mostly client-rendered")));
-  const thin: Hit[] = [];
-  for (const result of state.patterns) {
-    const uniqueness = result.aggregate.content.uniqueness;
-    if (uniqueness === null || uniqueness >= 0.3) continue;
-    for (const page of result.pages) {
-      if (page.data && page.data.structure.main.words < 250) thin.push({ pattern: page.pattern, url: page.url });
-    }
-  }
-  out.push(issue("thin-pages", "medium", "Thin, templated pages", "Under 250 words with less than 30% unique text across samples: pages that mostly repeat each other.", thin));
 
   // Images and resources.
-  out.push(issue("images-missing-alt", "low", "Images missing alt text", "Images without an alt attribute are invisible to screen readers and image search.", hits((p) => p.data.structure.images.missingAlt > 0)));
-  out.push(issue("images-missing-dimensions", "low", "Images missing width or height", "Images without dimensions shift the layout as they load.", hits((p) => p.data.structure.images.missingDimensions > 0)));
-  out.push(issue("mixed-content", "medium", "http resources on https pages", "Browsers block or warn about insecure resources on secure pages.", hits((p) => p.data.perf.mixedContent.length > 0)));
 
   // Redirects and host handling.
   const chained = all.filter((page) => page.redirectChain.length > 1).map((page) => ({ pattern: page.pattern, url: page.url }));
@@ -162,7 +186,6 @@ export function findIssues(state: AnalysisState): { issues: Issue[]; blocked: Bl
       ),
     );
   }
-  out.push(issue("internal-nofollow", "low", "Nofollow on internal links", "Nofollow on your own links stops link value flowing to your own pages.", hits((p) => p.data.links.internalNofollow > 0)));
   const analysedPatterns = new Set(state.patterns.map((result) => result.pattern));
   if (analysedPatterns.size > 0) {
     out.push(

@@ -1,6 +1,15 @@
 "use client";
 
-export type Group = { pattern: string; count: number; urls: string[] };
+export type Group = {
+  pattern: string;
+  count: number;
+  urls: string[];
+  share?: number;
+  lastmodNewest?: string | null;
+  lastmodOldest?: string | null;
+  lastmodCoverage?: number;
+  placeholders?: import("@/lib/patterns").Placeholder[];
+};
 
 export function formatNumber(value: number): string {
   return value.toLocaleString("en-US");
@@ -99,6 +108,19 @@ export const ChevronIcon = ({ open }: { open: boolean }) => (
 
 export const secondaryButton =
   "inline-flex h-11 flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-md border border-rule bg-transparent px-3 text-sm sm:px-4 font-medium text-ink transition-colors hover:border-contour hover:text-contour disabled:cursor-not-allowed disabled:text-muted disabled:hover:border-rule sm:flex-none";
+
+/** Saves text as a file download. Works on mobile Chrome. */
+export function downloadText(filename: string, text: string, type: string) {
+  const blob = new Blob([text], { type });
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(href), 10_000);
+}
 
 /** Builds a CSV (header + rows, every cell quoted) and saves it as a download. */
 export function downloadCsv(filename: string, header: string[], rows: string[][]) {

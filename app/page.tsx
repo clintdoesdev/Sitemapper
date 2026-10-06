@@ -24,18 +24,47 @@ import {
   type ExtractionJob,
 } from "./contents";
 import type { ExtractResult } from "@/lib/contents";
+import { aggregatePattern, buildLinkMap, pickSamples, stackSummary } from "@/lib/aggregate";
+import type { AnalysisState, MapSummary, PatternResult } from "@/lib/analysis-types";
+import type { SitemapStat } from "@/lib/crawl";
+import type { PageAnalysis } from "@/lib/extract/types";
+import { findIssues, issuesForPattern } from "@/lib/issues";
+import type { SiteReport } from "@/lib/site";
+import { Segmented } from "@/components/bits";
+import { ExportSection } from "@/components/ExportSection";
+import { IssuesSection } from "@/components/IssuesSection";
+import { LinkMapSection } from "@/components/LinkMapSection";
+import { MethodLimits } from "@/components/MethodLimits";
+import { PatternPanel } from "@/components/PatternPanel";
+import { SiteSection } from "@/components/SiteSection";
 
 type MapResult = {
   origin: string;
   source: "sitemap" | "crawl";
   sitemaps: string[];
+  sitemapStats?: SitemapStat[];
   truncated: boolean;
   notes: string[];
   total: number;
   groups: Group[];
 };
 
-const MAX_RENDERED_URLS = 500;
+/** The analysis covers the largest patterns, up to this many. */
+const MAX_ANALYSED_PATTERNS = 20;
+/** /api/analyse calls in flight; each fetches 2 pages at a time, so never more than 4. */
+const ANALYSE_WORKERS = 2;
+const PAGES_PER_PATTERN = [
+  { value: 1, label: "1" },
+  { value: 2, label: "2" },
+  { value: 3, label: "3" },
+] as const;
+type RunState = {
+  state: "running" | "done" | "stopped" | "failed";
+  done: number;
+  total: number;
+  active: string[];
+  errors: string[];
+};
 /** Most pages one extraction run covers; running again continues with the rest. */
 const MAX_EXTRACT_PAGES = 5_000;
 const EXTRACT_CHUNK = 10;
@@ -128,6 +157,15 @@ export default function Home() {
   const [job, setJob] = useState<ExtractionJob | null>(null);
   const extractAbort = useRef<AbortController | null>(null);
   const extracting = job?.state === "running";
+  const [pagesPerPattern, setPagesPerPattern] = useState<1 | 2 | 3>(2);
+  const [site, setSite] = useState<SiteReport | null>(null);
+  const siteRef = useRef<SiteReport | null>(site);
+  siteRef.current = site;
+  const [siteError, setSiteError] = useState<string | null>(null);
+  const [results, setResults] = useState<Record<string, PatternResult>>({});
+  const [run, setRun] = useState<RunState | null>(null);
+  const analysisAbort = useRef<AbortController | null>(null);
+  const analysing = run?.state === "running";
 
   const deferredFilter = useDeferredValue(filter);
 
@@ -135,6 +173,7 @@ export default function Home() {
     return () => {
       if (copiedTimer.current) clearTimeout(copiedTimer.current);
       extractAbort.current?.abort();
+      analysisAbort.current?.abort();
     };
   }, []);
 
@@ -157,7 +196,7 @@ export default function Home() {
       .map((group) => {
         const haystack = searchable.get(group.pattern) ?? [];
         const urls = group.urls.filter((_, index) => haystack[index].includes(query));
-        return { pattern: group.pattern, count: urls.length, urls };
+        return { ...group, count: urls.length, urls };
       })
       .filter((group) => group.count > 0)
       .sort((a, b) => b.count - a.count || a.pattern.localeCompare(b.pattern));
@@ -167,6 +206,58 @@ export default function Home() {
   const largest = visibleGroups[0]?.count ?? 0;
   const isFiltering = deferredFilter.trim().length > 0;
   const host = result ? new URL(result.origin).hostname : "";
+
+  const largestPatterns = useMemo(
+    () => (result ? result.groups.filter((group) => group.pattern !== "/").slice(0, MAX_ANALYSED_PATTERNS).map((group) => group.pattern) : []),
+    [result],
+  );
+
+  const analysisState = useMemo<AnalysisState | null>(() => {
+    if (!result || (!site && Object.keys(results).length === 0)) return null;
+    const map: MapSummary = {
+      origin: result.origin,
+      host: new URL(result.origin).hostname,
+      source: result.source,
+      total: result.total,
+      sitemaps: result.sitemaps,
+      sitemapStats: result.sitemapStats ?? [],
+      truncated: result.truncated,
+      notes: result.notes,
+      groups: result.groups.map((group) => ({
+        pattern: group.pattern,
+        count: group.count,
+        share: group.share ?? 0,
+        lastmodNewest: group.lastmodNewest ?? null,
+        lastmodOldest: group.lastmodOldest ?? null,
+        lastmodCoverage: group.lastmodCoverage ?? 0,
+        placeholders: group.placeholders ?? [],
+      })),
+    };
+    return {
+      map,
+      site,
+      patterns: result.groups.map((group) => results[group.pattern]).filter((item): item is PatternResult => Boolean(item)),
+      pagesPerPattern,
+      generatedAt: new Date().toISOString(),
+    };
+  }, [result, site, results, pagesPerPattern]);
+
+  const absoluteGroups = useMemo(
+    () => (result ? result.groups.map((group) => ({ pattern: group.pattern, urls: group.urls.map((url) => toAbsolute(url, result.origin)) })) : []),
+    [result],
+  );
+  const findings = useMemo(() => (analysisState ? findIssues(analysisState) : { issues: [], blocked: [] }), [analysisState]);
+  const linkMap = useMemo(
+    () => (analysisState ? buildLinkMap(analysisState.patterns, site?.homepage ?? null, analysisState.map.groups.map((group) => group.pattern)) : null),
+    [analysisState, site],
+  );
+  const stack = useMemo(
+    () => stackSummary([...(site ? [site.homepage] : []), ...Object.values(results).flatMap((item) => item.pages)]),
+    [site, results],
+  );
+  const analysedPages = analysisState
+    ? analysisState.patterns.reduce((sum, item) => sum + item.pages.length, 0) + (site ? 1 : 0)
+    : 0;
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -202,6 +293,11 @@ export default function Home() {
       extractAbort.current?.abort();
       setContents(new Map());
       setJob(null);
+      analysisAbort.current?.abort();
+      setSite(null);
+      setSiteError(null);
+      setResults({});
+      setRun(null);
     } catch {
       setError("Couldn't reach the Sitemapper server. Check your connection and try again.");
     } finally {
@@ -211,7 +307,7 @@ export default function Home() {
 
   /** Extracts the contents of every listed page not extracted yet. */
   async function extractContents() {
-    if (!result || extracting) return;
+    if (!result || extracting || analysing) return;
     const listed = visibleGroups.flatMap((group) => group.urls.map((url) => toAbsolute(url, result.origin)));
     const pending = listed.filter((url) => !contentsRef.current.get(url)?.ok);
     const urls = pending.slice(0, MAX_EXTRACT_PAGES);
@@ -359,6 +455,108 @@ export default function Home() {
     }
   }
 
+  /** Site checks (once per map), then sample pages of each pattern, 2 patterns at a time. */
+  async function runAnalysis(patternList: string[]) {
+    if (!result || analysing || extracting) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    analysisAbort.current = controller;
+    const origin = result.origin;
+    const siteHost = new URL(origin).hostname;
+    const allPatterns = result.groups.map((group) => group.pattern).slice(0, 500);
+    const plan = patternList
+      .map((pattern) => {
+        const group = result.groups.find((item) => item.pattern === pattern);
+        const urls = group ? pickSamples(group.urls.map((url) => toAbsolute(url, origin)), pagesPerPattern, siteHost) : [];
+        return { pattern, count: group?.count ?? 0, urls };
+      })
+      .filter((item) => item.urls.length > 0);
+    let currentSite = siteRef.current;
+    const total = plan.reduce((sum, item) => sum + item.urls.length, 0) + (currentSite ? 0 : 1);
+    setRun({ state: "running", done: 0, total, active: [], errors: [] });
+
+    const post = async <T,>(path: string, body: unknown): Promise<T> => {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      });
+      let data: (T & { error?: string }) | null = null;
+      try {
+        data = await response.json();
+      } catch {
+        data = null;
+      }
+      if (!response.ok || !data || data.error) {
+        throw new ServerError(
+          data?.error ??
+            (response.status === 504
+              ? "The request took longer than a minute. Try again with fewer pages per pattern."
+              : `The server returned an error (status ${response.status}).`),
+        );
+      }
+      return data;
+    };
+
+    try {
+      if (!currentSite) {
+        try {
+          currentSite = await post<SiteReport>("/api/site", { origin, patterns: allPatterns, sampleUrl: plan[0]?.urls[0] ?? null });
+          setSite(currentSite);
+          setSiteError(null);
+        } catch (error) {
+          if (signal.aborted) throw error;
+          setSiteError(error instanceof ServerError ? error.message : "Couldn't reach the Sitemapper server for the site checks.");
+        }
+        setRun((current) => current && { ...current, done: current.done + 1 });
+      }
+      const robotsTxt = currentSite?.robots.present && !currentSite.robots.truncated ? currentSite.robots.text : undefined;
+      await inPool(plan, ANALYSE_WORKERS, async (item) => {
+        setRun((current) => current && { ...current, active: [...current.active, item.pattern] });
+        try {
+          const data = await post<{ pages: PageAnalysis[]; trimmed?: string[] }>("/api/analyse", {
+            origin,
+            pattern: item.pattern,
+            urls: item.urls,
+            patterns: allPatterns,
+            robotsTxt,
+          });
+          const patternResult: PatternResult = {
+            pattern: item.pattern,
+            count: item.count,
+            pages: data.pages,
+            aggregate: aggregatePattern(item.pattern, data.pages),
+            trimmed: data.trimmed ?? [],
+          };
+          setResults((current) => ({ ...current, [item.pattern]: patternResult }));
+        } catch (error) {
+          if (signal.aborted) throw error;
+          const message = error instanceof ServerError ? error.message : "Couldn't reach the Sitemapper server.";
+          setRun((current) => current && { ...current, errors: [...current.errors, `${item.pattern}: ${message}`] });
+        } finally {
+          setRun(
+            (current) =>
+              current && {
+                ...current,
+                done: current.done + item.urls.length,
+                active: current.active.filter((pattern) => pattern !== item.pattern),
+              },
+          );
+        }
+      });
+      setRun((current) => current && { ...current, state: "done", active: [] });
+    } catch {
+      setRun((current) => current && { ...current, state: signal.aborted ? "stopped" : "failed", active: [] });
+    } finally {
+      if (analysisAbort.current === controller) analysisAbort.current = null;
+    }
+  }
+
+  function stopAnalysis() {
+    analysisAbort.current?.abort();
+  }
+
   function stopExtracting() {
     extractAbort.current?.abort();
   }
@@ -413,8 +611,8 @@ export default function Home() {
               See every page a site publishes
             </h1>
             <p className="mt-5 max-w-[52ch] text-base leading-relaxed text-muted sm:text-lg">
-              Reads the site&apos;s sitemap, or follows its links if it has none, then groups the pages by URL
-              pattern so you can see how the site is built.
+              Reads the site&apos;s sitemap, or follows its links if it has none, groups the pages by URL pattern,
+              then opens sample pages to show how each template is built.
             </p>
           </div>
 
@@ -496,6 +694,76 @@ export default function Home() {
               ))}
             </p>
 
+            {largestPatterns.length > 0 && (
+              <div className="mt-8">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center gap-3">
+                    <span aria-hidden="true" className="text-sm text-ink">
+                      Pages per pattern
+                    </span>
+                    <Segmented
+                      legend="Pages per pattern"
+                      options={PAGES_PER_PATTERN}
+                      value={pagesPerPattern}
+                      onChange={(value) => setPagesPerPattern(value)}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => runAnalysis(largestPatterns)}
+                    disabled={analysing || extracting}
+                    className="h-11 shrink-0 rounded-md bg-ink px-5 text-sm font-medium text-sheet transition-colors hover:bg-contour disabled:cursor-not-allowed disabled:bg-muted disabled:hover:bg-muted"
+                  >
+                    {analysing ? "Analysing…" : `Analyse ${plural(largestPatterns.length, "pattern")}`}
+                  </button>
+                </div>
+                <p className="mt-2 max-w-[52ch] text-sm text-muted">
+                  Analyses the largest {largestPatterns.length === 1 ? "pattern" : `${formatNumber(largestPatterns.length)} patterns`} and
+                  the homepage.
+                </p>
+                {run && (
+                  <div className="mt-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                      <p role="status" className="text-sm text-muted">
+                        {run.state === "running"
+                          ? `Analysed ${formatNumber(run.done)} of ${plural(run.total, "page")}.`
+                          : run.state === "stopped"
+                            ? `Stopped after ${plural(run.done, "page")}. Finished results are kept.`
+                            : run.state === "failed"
+                              ? `Stopped after ${plural(run.done, "page")}.`
+                              : `Analysed ${plural(analysedPages, "page")}.`}
+                      </p>
+                      {run.state === "running" && (
+                        <button type="button" onClick={stopAnalysis} className={secondaryButton.replace("flex-1 ", "")}>
+                          Stop analysis
+                        </button>
+                      )}
+                    </div>
+                    {run.state === "running" && (
+                      <div className="mt-3 h-[3px] w-full overflow-hidden rounded-full bg-contour-soft">
+                        <div
+                          className="h-full rounded-full bg-contour"
+                          style={{ width: `${run.total ? (run.done / run.total) * 100 : 0}%` }}
+                        />
+                      </div>
+                    )}
+                    {run.errors.length > 0 && (
+                      <ul className="mt-3 space-y-1">
+                        {run.errors.map((message) => (
+                          <li key={message} className="border-l-2 border-alert pl-3 text-sm text-ink">
+                            {message}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+                {siteError && <p className="mt-3 border-l-2 border-alert pl-3 text-sm text-ink">Site checks failed: {siteError}</p>}
+              </div>
+            )}
+
+            {site && analysisState && <SiteSection site={site} map={analysisState.map} stack={stack} />}
+
             {result.total > 0 && (
               <>
                 <div className="mt-8 flex flex-col gap-3">
@@ -536,7 +804,7 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={extractContents}
-                      disabled={visibleTotal === 0 || extracting}
+                      disabled={visibleTotal === 0 || extracting || analysing}
                       className={secondaryButton}
                     >
                       <ExtractIcon />
@@ -568,7 +836,8 @@ export default function Home() {
                     {visibleGroups.map((group, index) => {
                       const isOpen = open.has(group.pattern);
                       const panelId = `group-panel-${index}`;
-                      const shown = group.urls.slice(0, MAX_RENDERED_URLS);
+                      const patternResult = results[group.pattern];
+                      const patternIssues = patternResult ? issuesForPattern(findings.issues, group.pattern) : [];
                       return (
                         <li key={group.pattern}>
                           <button
@@ -585,6 +854,16 @@ export default function Home() {
                               <span className="block truncate font-mono text-sm" title={group.pattern}>
                                 {group.pattern}
                               </span>
+                              {patternResult && (
+                                <span className="mt-0.5 flex min-w-0 gap-2 text-[13px] text-muted">
+                                  <span className="min-w-0 flex-1 truncate">
+                                    {patternResult.aggregate.templates.title.template ?? "No shared title"}
+                                  </span>
+                                  {patternIssues.length > 0 && (
+                                    <span className="shrink-0 text-alert">{plural(patternIssues.length, "issue")}</span>
+                                  )}
+                                </span>
+                              )}
                               <span className="mt-2 block h-1 w-full rounded-full bg-contour-soft">
                                 <span
                                   className="block h-full rounded-full bg-contour"
@@ -597,31 +876,16 @@ export default function Home() {
                             </span>
                           </button>
                           {isOpen && (
-                            <div
+                            <PatternPanel
                               id={panelId}
-                              className="max-h-96 overflow-y-auto border-t border-rule bg-sheet px-4 py-3"
-                            >
-                              <ul className="space-y-0.5">
-                                {shown.map((url) => (
-                                  <li key={url}>
-                                    <a
-                                      href={toAbsolute(url, result.origin)}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="block truncate py-1 font-mono text-[13px] text-ink hover:text-contour hover:underline"
-                                    >
-                                      {url}
-                                    </a>
-                                  </li>
-                                ))}
-                              </ul>
-                              {group.count > MAX_RENDERED_URLS && (
-                                <p className="mt-3 text-sm text-muted">
-                                  Showing {formatNumber(MAX_RENDERED_URLS)} of {formatNumber(group.count)}. Download
-                                  the CSV for the full list.
-                                </p>
-                              )}
-                            </div>
+                              group={group}
+                              origin={result.origin}
+                              result={patternResult}
+                              issues={patternIssues}
+                              running={run?.active.includes(group.pattern) ?? false}
+                              canAnalyse={!analysing && !extracting}
+                              onAnalyse={() => runAnalysis([group.pattern])}
+                            />
                           )}
                         </li>
                       );
@@ -630,6 +894,10 @@ export default function Home() {
                 )}
               </>
             )}
+
+            {analysisState && linkMap && analysisState.patterns.length > 0 && <LinkMapSection linkMap={linkMap} />}
+            {analysisState && <IssuesSection issues={findings.issues} blocked={findings.blocked} />}
+            {analysisState && <ExportSection state={analysisState} groupsWithUrls={absoluteGroups} />}
 
             <ContentsSection groups={visibleGroups} contents={contents} origin={result.origin} />
 
@@ -654,6 +922,7 @@ export default function Home() {
                 </ul>
               </details>
             )}
+            {analysisState && <MethodLimits state={analysisState} blocked={findings.blocked} />}
           </section>
         )}
       </main>

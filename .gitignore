@@ -5,3 +5,4 @@ next-env.d.ts
 *.tsbuildinfo
 .vercel
 .env*
+.scratch-e2e
