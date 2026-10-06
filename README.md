@@ -50,7 +50,7 @@ The "Send requests as a regular browser" setting is under **Advanced options** b
 ### Politeness and safety
 
 - Site checks and page analysis always identify as `SitemapperBot/1.0 (site structure study tool)`.
-- Never more than 4 requests in flight to the site during an analysis (two analysis calls at a time, two pages each), with a 300 ms pause between batches. Analysis and Extract contents can't run at the same time.
+- Never more than 4 requests in flight to the site during an analysis (two analysis calls at a time, two pages each), with a 300 ms pause between batches. Studying sample pages and Read every page can't run at the same time.
 - robots.txt is read first; disallowed URLs are skipped and listed under **Method and limits**.
 - Outbound and affiliate links (`/go/`, `/out/`, `/visit/`, `/recommends/`, tracking redirects) are recorded, never requested. Redirects that leave the site are recorded, not followed.
 - No forms are submitted, nothing logs in, and bot protection is never worked around. A page behind a challenge (a 403 or 503 with `cf-mitigated`, a "Just a moment..." page or a challenge-platform marker) shows "Blocked by bot protection. Open view-source:URL in a browser to study it manually." inside its pattern, and the rest of the analysis continues.
