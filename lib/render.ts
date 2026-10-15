@@ -56,7 +56,7 @@ export async function withBrowser<T>(work: (browser: Browser) => Promise<T>): Pr
   }
 }
 
-async function isAllowedRequest(request: HTTPRequest): Promise<boolean> {
+export async function isAllowedRequest(request: HTTPRequest): Promise<boolean> {
   const url = request.url();
   if (url.startsWith("data:") || url.startsWith("blob:")) return true;
   try {

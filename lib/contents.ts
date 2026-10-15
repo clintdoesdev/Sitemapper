@@ -213,7 +213,7 @@ export function extractContents(
 
 const MAX_ROBOTS_TEXT = 100_000;
 
-async function loadRobotsText(origin: string, budget: Budget): Promise<string> {
+export async function loadRobotsText(origin: string, budget: Budget): Promise<string> {
   const response = await fetchText(`${origin}/robots.txt`, budget);
   const text =
     response.ok && response.status < 400 && !/text\/html/i.test(response.contentType) ? response.text : "";

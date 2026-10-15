@@ -7,6 +7,10 @@ const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/api/crawl": ["./node_modules/@sparticuz/chromium/bin/**"],
     "/api/extract": ["./node_modules/@sparticuz/chromium/bin/**"],
+    "/api/screenshot": ["./node_modules/@sparticuz/chromium/bin/**"],
+    // Background jobs open JavaScript and blocked pages in the browser too.
+    "/api/jobs": ["./node_modules/@sparticuz/chromium/bin/**"],
+    "/api/jobs/**": ["./node_modules/@sparticuz/chromium/bin/**"],
   },
 };
 

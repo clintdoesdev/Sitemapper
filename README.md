@@ -10,6 +10,12 @@ Enter any domain and get every page the site publishes, plus each page's content
 
 You can stop at any time; pressing Get page contents again continues with the pages not read yet.
 
+## Screenshots
+
+The **Screenshots** tab takes a picture of each whole page. Pick how many pages from each group (the same sample as Get page contents) and a **Screen** size (Desktop, 1280 pixels wide, or Phone, 390 wide), then press **Take screenshots**. Each page is opened in headless Chrome, scrolled to the bottom a screen at a time so lazy-loaded images and sections appear, scrolled back up, and captured as one JPEG. **Download screenshots (.zip)** gives the images numbered in page-list order (`001-predictions-arsenal-vs-chelsea.jpg`) plus `screenshots.csv` saying which file is which page. Pages that couldn't be captured are left out and listed with the reason under **Pages**.
+
+Screenshots run from the open page, 3 at a time, so keep it open until they finish. Pages taller than 15,000 pixels are cut there (the CSV says so), and each image is kept under 3 MB by lowering the JPEG quality. robots.txt, the SSRF guard and the affiliate-path rule apply as for contents.
+
 ## Getting past blocks
 
 Each page is tried in order until one works:
@@ -50,6 +56,7 @@ Running locally with `npm run dev`, jobs are kept in memory without any setup an
 | Get page contents (from the open page) | 5,000 pages per run, 20 per request, 4 requests at a time, each reading 6 pages at once |
 | Get page contents (in the background) | 5,000 pages per run, 80 pages per step with 20 at once, slices of about 50 seconds, 3 jobs at a time, kept 7 days |
 | Real-browser reads | 6 pages per request, 3 tabs at a time, 15 seconds per page |
+| Screenshots | 1 page per request, 3 requests at a time, up to 15,000 pixels tall, under 3 MB each |
 | Page size | 3 MB |
 
 The CSV starts with a UTF-8 byte order mark so Excel shows accents and dashes correctly. Headless Chrome uses [`puppeteer-core`](https://pptr.dev) and [`@sparticuz/chromium`](https://github.com/Sparticuz/chromium); locally it uses your installed Google Chrome, or `CHROME_PATH`.
@@ -70,6 +77,7 @@ To run the tests (offline: DNS and fetch are injected):
 ```bash
 npm run selftest        # npx tsx scripts/selftest.ts
 npm run test:patterns   # the original grouping cases on their own
+CHROME_PATH=/path/to/chrome npm run selftest   # also runs the real-browser screenshot test
 ```
 
 ## Deploy to Vercel
@@ -90,6 +98,9 @@ The API routes run on the Node.js runtime with `maxDuration = 60`, which the Hob
 - `lib/patterns.ts`: groups URLs into patterns
 - `lib/contents.ts` and `app/api/extract/route.ts`: reading pages. `POST { urls, render }` (at most 20 URLs, or 6 with `render: true`) returns `{ pages }` in the same order
 - `lib/render.ts`: headless Chrome
+- `lib/screenshot.ts` and `app/api/screenshot/route.ts`: full-page screenshots. `POST { url, device, robotsTxt }` returns `{ ok, image (base64 JPEG), width, height, truncated }`
+- `lib/zip.ts`: a small zip writer for the screenshots download
+- `app/screenshots.tsx`: the Screenshots tab
 - `lib/store.ts`: Upstash Redis over REST, or memory when running locally
 - `lib/jobs.ts` and `app/api/jobs/**`: background runs. `POST /api/jobs { origin, items: [url, pattern][] }` returns `{ id }`; `GET /api/jobs/<id>` is the progress, `GET /api/jobs/<id>/results?offset=` pages through results, `GET /api/jobs/<id>/items` lists the job's pages, `POST /api/jobs/<id>/stop` stops it
 - `app/page.tsx`: the interface; `app/contents.tsx` holds the progress, job link and download formats; `app/ui.tsx` shared icons and helpers

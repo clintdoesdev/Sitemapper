@@ -11,6 +11,14 @@ import { POST as extractRoute } from "../app/api/extract/route";
 import { POST as jobsRoute } from "../app/api/jobs/route";
 import { createJob, getJobItems, getJobResults, getJobStatus, jobsConfig, runSlice, stopJob, type JobMeta } from "../lib/jobs";
 import { memoryStore, storeConfig } from "../lib/store";
+import { crc32, makeZip, slugForUrl } from "../lib/zip";
+import { renderConfig, withBrowser } from "../lib/render";
+import { screenshotPage } from "../lib/screenshot";
+import { createServer } from "node:http";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { POST as runRoute } from "../app/api/jobs/[id]/run/route";
 
 type Test = { name: string; run: () => void | Promise<void> };
@@ -484,6 +492,72 @@ test("background jobs: read, retry after a 429, hand over between slices, page t
     fetcherConfig.fetch = shared;
     Object.assign(jobsConfig, savedConfig);
     storeConfig.store = undefined;
+  }
+});
+
+test("zip: stored entries with UTF-8 names that unzip reads back", () => {
+  assert.equal(crc32(new TextEncoder().encode("123456789")), 0xcbf43926);
+  const zip = makeZip([
+    { name: "001-home.jpg", data: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]) },
+    { name: "screenshots.csv", data: new TextEncoder().encode("file,url\r\n") },
+  ]);
+  assert.equal(new DataView(zip.buffer).getUint32(0, true), 0x04034b50);
+  const dir = mkdtempSync(join(tmpdir(), "zip-"));
+  writeFileSync(join(dir, "test.zip"), zip);
+  try {
+    const listing = execFileSync("unzip", ["-t", join(dir, "test.zip")]).toString();
+    assert.match(listing, /No errors detected/);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  assert.equal(slugForUrl("https://example.com/predictions/Arsenal-vs-Chelsea/?x=1"), "predictions-arsenal-vs-chelsea-x-1");
+  assert.equal(slugForUrl("https://example.com/"), "home");
+});
+
+// Needs a real Chrome: CHROME_PATH=/path/to/chrome npm run selftest
+test("screenshots: scrolls so lazy content loads, then captures the whole page", async () => {
+  if (!process.env.CHROME_PATH) {
+    console.log("      (skipped: set CHROME_PATH to run)");
+    return;
+  }
+  const hits: string[] = [];
+  const server = createServer((request, response) => {
+    hits.push(request.url ?? "");
+    if (request.url === "/late.svg") {
+      response.writeHead(200, { "content-type": "image/svg+xml" });
+      response.end('<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200"><rect width="200" height="200" fill="red"/></svg>');
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end(`<!doctype html><html><body style="margin:0">
+      <div style="height:5200px;background:linear-gradient(#fff,#ccc)">Top</div>
+      <img id="late" data-src="/late.svg" width="200" height="200">
+      <div style="height:600px">Bottom</div>
+      <script>
+        new IntersectionObserver((entries, observer) => {
+          for (const entry of entries) if (entry.isIntersecting) { entry.target.src = entry.target.dataset.src; observer.disconnect(); }
+        }).observe(document.getElementById("late"));
+      </script></body></html>`);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  dns["shots.example"] = ["93.184.215.50"];
+  clearGuardCache();
+  const savedArgs = renderConfig.extraArgs;
+  renderConfig.extraArgs = [`--host-resolver-rules=MAP shots.example 127.0.0.1:${port}`, "--no-proxy-server"];
+  try {
+    const shot = await withBrowser((browser) => screenshotPage(browser, "http://shots.example/", "desktop", 45_000));
+    assert.ok(shot.ok, shot.ok ? "" : shot.error);
+    assert.ok(hits.includes("/late.svg"), "the image far down the page loaded while scrolling");
+    assert.equal(shot.width, 1280);
+    assert.ok(shot.height >= 6000, `height ${shot.height}`);
+    assert.equal(shot.truncated, false);
+    assert.deepEqual([...shot.image.slice(0, 2)], [0xff, 0xd8], "a JPEG");
+    const phone = await withBrowser((browser) => screenshotPage(browser, "http://shots.example/", "phone", 45_000));
+    assert.ok(phone.ok && phone.width === 390);
+  } finally {
+    renderConfig.extraArgs = savedArgs;
+    server.close();
   }
 });
 

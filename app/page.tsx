@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckIcon,
   ChevronIcon,
@@ -27,6 +27,7 @@ import {
 import type { ExtractResult, PageContents } from "@/lib/contents";
 import type { JobStatus } from "@/lib/jobs";
 import { spreadSample } from "@/lib/patterns";
+import { ScreenshotsPanel } from "./screenshots";
 
 type MapResult = {
   origin: string;
@@ -187,6 +188,9 @@ export default function Home() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
   const [perGroup, setPerGroup] = useState<PerGroup>(10);
+  const [tab, setTab] = useState<"contents" | "screenshots">("contents");
+  const [shooting, setShooting] = useState(false);
+  const onShootingChange = useCallback((running: boolean) => setShooting(running), []);
   const [flashed, flash] = useFlash();
   const [copyError, setCopyError] = useState(false);
 
@@ -587,6 +591,27 @@ export default function Home() {
 
   const hasContents = read.ok.length > 0;
 
+  const perGroupControl = (
+    <label className="flex items-center gap-3 text-sm text-ink">
+      Pages from each group
+      <select
+        value={String(perGroup)}
+        onChange={(event) => {
+          const value = event.target.value;
+          setPerGroup(value === "all" ? "all" : (Number(value) as PerGroup));
+        }}
+        disabled={extracting || shooting}
+        className="h-12 rounded-md border border-rule bg-sheet px-3 text-base text-ink hover:border-contour/60 disabled:text-muted"
+      >
+        {PER_GROUP_OPTIONS.map((option) => (
+          <option key={option} value={String(option)}>
+            {option === "all" ? "All" : option}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+
   return (
     <div className="overflow-x-clip">
       <main className="mx-auto w-full max-w-3xl px-5 pt-16 pb-24 sm:pt-24">
@@ -672,7 +697,50 @@ export default function Home() {
               ))}
             </p>
 
-            <section aria-labelledby="contents-heading" className="mt-10">
+            <div role="tablist" aria-label="What to get" className="mt-10 flex gap-6 border-b border-rule">
+              {(
+                [
+                  { value: "contents", label: "Contents" },
+                  { value: "screenshots", label: "Screenshots" },
+                ] as const
+              ).map((item, index, all) => (
+                <button
+                  key={item.value}
+                  type="button"
+                  role="tab"
+                  id={`tab-${item.value}`}
+                  aria-selected={tab === item.value}
+                  aria-controls={`panel-${item.value}`}
+                  tabIndex={tab === item.value ? 0 : -1}
+                  onClick={() => setTab(item.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+                    event.preventDefault();
+                    const next = all[(index + (event.key === "ArrowRight" ? 1 : all.length - 1)) % all.length];
+                    setTab(next.value);
+                    document.getElementById(`tab-${next.value}`)?.focus();
+                  }}
+                  className={`-mb-px border-b-2 py-3 font-display text-lg font-bold tracking-tight transition-colors ${
+                    tab === item.value ? "border-contour text-ink" : "border-transparent text-muted hover:text-contour"
+                  }`}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+
+            <div role="tabpanel" id="panel-screenshots" aria-labelledby="tab-screenshots" hidden={tab !== "screenshots"} className="mt-6">
+              <ScreenshotsPanel
+                host={host}
+                targets={targets}
+                perGroupControl={perGroupControl}
+                disabled={extracting}
+                onRunningChange={onShootingChange}
+              />
+            </div>
+
+            <div role="tabpanel" id="panel-contents" aria-labelledby="tab-contents" hidden={tab !== "contents"}>
+            <section aria-labelledby="contents-heading" className="mt-6">
               <h2 id="contents-heading" className="font-display text-2xl font-bold tracking-tight text-ink">
                 1. Get page contents
               </h2>
@@ -685,25 +753,8 @@ export default function Home() {
                   : "Keep this page open until it finishes."}
               </p>
               <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-                <label className="flex items-center gap-3 text-sm text-ink">
-                  Pages from each group
-                  <select
-                    value={String(perGroup)}
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      setPerGroup(value === "all" ? "all" : (Number(value) as PerGroup));
-                    }}
-                    disabled={extracting}
-                    className="h-12 rounded-md border border-rule bg-sheet px-3 text-base text-ink hover:border-contour/60 disabled:text-muted"
-                  >
-                    {PER_GROUP_OPTIONS.map((option) => (
-                      <option key={option} value={String(option)}>
-                        {option === "all" ? "All" : option}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button type="button" onClick={extractContents} disabled={targets.length === 0 || extracting} className={primaryButton}>
+                {perGroupControl}
+                <button type="button" onClick={extractContents} disabled={targets.length === 0 || extracting || shooting} className={primaryButton}>
                   <ExtractIcon />
                   {extracting ? "Reading pages…" : "Get page contents"}
                 </button>
@@ -751,6 +802,8 @@ export default function Home() {
                 <p className="mt-3 border-l-2 border-alert pl-3 text-sm text-ink">This browser blocked copying. Use the download instead.</p>
               )}
             </section>
+
+            </div>
 
             {result.groups.length > 0 && (
               <section aria-labelledby="pages-heading" className="mt-12">
